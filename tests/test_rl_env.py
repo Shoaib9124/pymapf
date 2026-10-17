@@ -191,9 +191,9 @@ def test_refusals_cascade():
     problem = pymapf.MAPFProblem(
         grid,
         [
-            pymapf.Agent("A", (1, 1), (1, 1)),
-            pymapf.Agent("B", (1, 2), (1, 2)),
-            pymapf.Agent("C", (1, 3), (1, 3)),
+            pymapf.Agent("A", (1, 1), (1, 4)),
+            pymapf.Agent("B", (1, 2), (1, 1)),
+            pymapf.Agent("C", (1, 3), (1, 2)),
         ],
     )
     env = MAPFEnv(problem)
@@ -503,3 +503,97 @@ def test_the_problem_is_reachable_without_touching_privates():
     env.reset(seed=0)
     optimal = pymapf.solve(env.problem, "cbs")
     assert optimal is not None and optimal.is_valid()
+
+
+# --------------------------------------------------------------------------
+# One-shot MAPF goal-locking semantics (Priority 1 regression tests)
+# --------------------------------------------------------------------------
+
+
+def test_finished_agent_stays_stationary_and_ignores_non_stay_actions():
+    """Once an agent reaches its assigned goal, it becomes finished and cannot
+    move away from its goal even if subsequent actions request movement."""
+    grid = pymapf.GridMap(
+        [
+            [1, 1, 1, 1, 1],
+            [1, 0, 0, 0, 1],
+            [1, 0, 0, 0, 1],
+            [1, 1, 1, 1, 1],
+        ]
+    )
+    # Agent A is 1 step away from its goal (1, 2); Agent B has goal at (2, 3)
+    problem = pymapf.MAPFProblem(
+        grid,
+        [
+            pymapf.Agent("A", (1, 1), (1, 2)),
+            pymapf.Agent("B", (2, 1), (2, 3)),
+        ],
+    )
+    env = MAPFEnv(problem, max_steps=10)
+    env.reset()
+    assert not env.finished["A"]
+    assert not env.finished["B"]
+
+    # Step 1: A moves RIGHT into its goal (1, 2); B stays at (2, 1)
+    _, rewards, term, trunc, infos = env.step({"A": RIGHT, "B": STAY})
+    assert env.positions["A"] == (1, 2)
+    assert env.finished["A"] is True
+    assert infos["A"]["at_goal"] is True
+    assert infos["A"]["finished"] is True
+    assert not term["A"]  # B has not finished yet
+
+    # Step 2: A attempts to move RIGHT/LEFT/DOWN away from its goal, while B moves RIGHT
+    for attempted_action in (RIGHT, LEFT, DOWN, UP):
+        _, r_step, term, trunc, infos = env.step({"A": attempted_action, "B": STAY})
+        assert env.positions["A"] == (1, 2), "Finished agent A must remain locked at goal"
+        assert env.finished["A"] is True
+        assert r_step["A"] == 0.0, "Finished agent receives 0 step reward while waiting"
+
+
+def test_occupied_goal_blocks_other_agents_from_entering():
+    """An agent that has finished at its goal occupies that cell permanently
+    and blocks other agents from entering it."""
+    grid = pymapf.GridMap(
+        [
+            [1, 1, 1, 1, 1],
+            [1, 0, 0, 0, 1],
+            [1, 1, 1, 1, 1],
+        ]
+    )
+    # Corridor: A starts at (1, 1) with goal (1, 2). B starts at (1, 3) with goal (1, 1).
+    problem = pymapf.MAPFProblem(
+        grid,
+        [
+            pymapf.Agent("A", (1, 1), (1, 2)),
+            pymapf.Agent("B", (1, 3), (1, 1)),
+        ],
+    )
+    env = MAPFEnv(problem, max_steps=8)
+    env.reset()
+
+    # Step 1: A moves RIGHT to (1, 2) (its goal) and finishes; B stays at (1, 3)
+    env.step({"A": RIGHT, "B": STAY})
+    assert env.positions["A"] == (1, 2)
+    assert env.finished["A"] is True
+
+    # Step 2: B tries to move LEFT into A's occupied goal (1, 2), while A tries to move RIGHT
+    _, _, _, _, infos = env.step({"A": RIGHT, "B": LEFT})
+    assert env.positions["A"] == (1, 2)
+    assert env.positions["B"] == (1, 3)
+    assert infos["B"]["collided"] is True
+
+
+def test_incomplete_episode_at_horizon_is_truncated_and_unsolved():
+    """When the evaluation horizon expires before all agents reach their goals,
+    the episode is recorded as truncated and unsolved."""
+    env = corridor_env(max_steps=2)
+    env.reset()
+    env.step({"A": STAY, "B": STAY})
+    _, _, term, trunc, _ = env.step({"A": STAY, "B": STAY})
+    assert all(trunc.values())
+    assert not any(term.values())
+    summary = env.episode_summary()
+    assert summary["solved"] is False
+    assert summary["truncated"] is True
+    assert env.solution().is_valid(env.problem) is False
+

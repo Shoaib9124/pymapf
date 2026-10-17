@@ -308,6 +308,80 @@ class TestResearchPlatform(unittest.TestCase):
         trainer.collect(obs)
         self.assertTrue(trainer.buffer.full)
 
+    def test_mappo_greedy_and_sampled_goal_locking_and_execution_logs(self):
+        from pymapf.core.solver import validate_solution
+
+        grid = GridMap(
+            [
+                [1, 1, 1, 1, 1, 1],
+                [1, 0, 0, 0, 0, 1],
+                [1, 0, 0, 0, 0, 1],
+                [1, 1, 1, 1, 1, 1],
+            ]
+        )
+        # Agent A is 1 step from its goal; Agent B is 3 steps from its goal.
+        problem = MAPFProblem(
+            grid,
+            [
+                Agent("A", (1, 1), (1, 2)),
+                Agent("B", (2, 1), (2, 4)),
+            ],
+        )
+
+        for mode in ("greedy", "sampled"):
+            res = run_single_algorithm(
+                problem,
+                "mappo",
+                {"mappo_mode": mode, "seed": 0, "mappo_eval_seed": 42},
+            )
+            self.assertIn("execution_log", res)
+            self.assertGreater(len(res["execution_log"]), 0)
+            self.assertEqual(res["mappo_eval_seed"], 42)
+            # Verify Agent A never leaves (1, 2) once it reaches (1, 2)
+            path_a = res["paths"].get("A", [])
+            reached = False
+            for cell in path_a:
+                if tuple(cell) == (1, 2):
+                    reached = True
+                elif reached:
+                    self.fail(f"Agent A moved away from goal (1, 2) to {cell} in {mode} mode")
+
+        # Verify Prioritized A* and CBS also return structured execution_log
+        for algo in ("prioritized", "cbs"):
+            res = run_single_algorithm(problem, algo, {"heuristic": "manhattan"})
+            self.assertTrue(res["solved"])
+            self.assertTrue(res["valid"])
+            self.assertGreater(len(res.get("execution_log", [])), 2)
+
+        # Verify validate_solution rejects a trajectory where an agent reaches
+        # its goal and then moves away before returning
+        bad_paths = {
+            "A": [(1, 1), (1, 2), (1, 3), (1, 2)],
+            "B": [(2, 1), (2, 2), (2, 3), (2, 4)],
+        }
+        audit = validate_solution(problem, bad_paths)
+        self.assertFalse(audit.valid)
+        self.assertFalse(audit.goal_occupancy_valid)
+
+    def test_multi_scenario_batch_experiment_and_separate_seeds(self):
+        batch = run_batch_experiment(
+            scenario_name="empty_room",
+            agent_counts=[2],
+            seeds=[0, 1],
+            options={
+                "scenarios": ["empty_room", "random_obstacles"],
+                "mappo_mode": "sampled",
+                "mappo_seed_offset": 500,
+            },
+        )
+        # 2 scenarios * 1 agent count * 2 seeds * 3 algorithms = 12 rows
+        self.assertEqual(len(batch["rows"]), 12)
+        mappo_rows = [r for r in batch["rows"] if r["algorithm"] == "mappo"]
+        self.assertEqual(len(mappo_rows), 4)
+        for r in mappo_rows:
+            self.assertEqual(r["mappo_eval_seed"], r["scenario_seed"] + 500)
+
 
 if __name__ == "__main__":
     unittest.main()
+

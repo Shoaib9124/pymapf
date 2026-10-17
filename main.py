@@ -49,6 +49,9 @@ def _extract_options(data: dict) -> dict:
         "time_limit",
         "mappo_mode",
         "seed",
+        "mappo_eval_seed",
+        "mappo_seed",
+        "mappo_seed_offset",
         "train_on_instance",
         "train_steps",
         "max_steps",
@@ -149,12 +152,14 @@ class ResearchPlatformHandler(SimpleHTTPRequestHandler):
                 return
 
             if parsed.path in ("/api/benchmark", "/api/batch"):
+                scenarios = data.get("scenarios")
                 scenario = data.get("scenario", "random_obstacles")
                 agent_counts = data.get("agent_counts", [2, 4, 6])
                 seeds = data.get("seeds", [0, 1, 2])
                 options = _extract_options(data)
                 report = run_batch_experiment(
                     scenario_name=scenario,
+                    scenarios=scenarios,
                     agent_counts=agent_counts,
                     seeds=seeds,
                     options=options,

@@ -325,6 +325,22 @@ def validate_solution(
                 % (agent.name, tuple(path[-1]), tuple(agent.goal))
             )
 
+        if getattr(solution, "algorithm", "") not in (
+            "prioritized",
+            "cbs",
+            "wcbs",
+            "space_time_astar",
+        ):
+            for t in range(len(path) - 1):
+                if tuple(path[t]) == tuple(agent.goal) and tuple(
+                    path[t + 1]
+                ) != tuple(agent.goal):
+                    goal_occupancy_valid = False
+                    violations.append(
+                        "Agent %s moved away from assigned goal %s between t=%d and t=%d."
+                        % (agent.name, tuple(agent.goal), t, t + 1)
+                    )
+
     names = [a.name for a in problem.agents if a.name in solution.paths]
     normalized_paths: Dict[str, List[Cell]] = {
         name: [tuple(c) for c in solution.paths[name]]

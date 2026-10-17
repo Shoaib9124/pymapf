@@ -15,15 +15,23 @@
 
 <header class="top">
   <div class="wrap top-inner">
-    <a href="#workspace" class="brand-title">PyMAPF Research Workbench</a>
-    <nav class="top-nav" aria-label="Primary navigation">
-      <a href="#workspace">Problem &amp; Editor</a>
-      <a href="#comparison">Side-by-Side Comparison</a>
-      <a href="#validation">Metrics &amp; Validation</a>
-      <a href="#experiments">Batch Experiments</a>
-      <a href="#methodology">Methodology</a>
+    <a href="#setup" class="brand-title" data-nav-page="setup">PyMAPF Research Workbench</a>
+    <nav class="top-nav page-tabs" aria-label="Primary workflow navigation">
+      <button type="button" class="nav-tab active" data-nav-page="setup" id="tab-btn-setup">
+        <span class="step-num">01</span> Setup &amp; Workspace
+      </button>
+      <button type="button" class="nav-tab" data-nav-page="simulation" id="tab-btn-simulation">
+        <span class="step-num">02</span> Simulation &amp; Execution Logs
+      </button>
+      <button type="button" class="nav-tab" data-nav-page="results" id="tab-btn-results">
+        <span class="step-num">03</span> Results &amp; Analysis
+      </button>
     </nav>
     <div class="top-actions">
+      <div class="engine-status compact-engine" id="engine-status-line">
+        <span class="status-glyph" id="engine-glyph">●</span>
+        <span id="engine-label">Initialising backend…</span>
+      </div>
       <button class="button ghost small-btn" id="theme-toggle" type="button" aria-label="Toggle light and dark theme">Light / Dark</button>
     </div>
   </div>
@@ -31,37 +39,33 @@
 
 <main>
 
-  <!-- ===================================================== HERO / SUMMARY -->
-  <section class="hero-bar">
-    <div class="wrap hero-inner">
-      <div>
-        <p class="eyebrow">2D Multi-Agent Pathfinding Research Platform · PyMAPF v0.9.0</p>
-        <h1>Controlled Algorithmic Comparison on Shared 2D Grids</h1>
-        <p class="lede">
-          Configure a 2D occupancy grid and multi-agent start/goal assignments once, then execute and replay
-          <strong>Prioritized Space-Time A*</strong>, <strong>Conflict-Based Search (CBS)</strong>, and
-          <strong>Multi-Agent Proximal Policy Optimization (MAPPO)</strong> side by side under identical movement,
-          collision, and goal-occupancy rules.
-        </p>
-      </div>
-      <div class="hero-cta-box">
-        <button class="button primary" id="hero-run-compare" type="button">▶ Run 3-Way Comparison</button>
-        <div class="engine-status" id="engine-status-line">
-          <span class="status-glyph" id="engine-glyph">●</span>
-          <span id="engine-label">Initialising execution backend…</span>
+  <!-- ===================================================================== -->
+  <!-- PAGE 1: SETUP & WORKSPACE (Problem Editor + Batch Configuration)      -->
+  <!-- ===================================================================== -->
+  <section id="page-setup" class="page-view active-page" data-page="setup">
+    <div class="wrap">
+      <div class="page-banner">
+        <div>
+          <p class="eyebrow">Step 1 of 3 · Problem &amp; Experiment Configuration</p>
+          <h1>Setup &amp; Interactive 2D Workspace</h1>
+          <p class="lede">
+            Configure a reproducible 2D multi-agent pathfinding instance, customize obstacles and start/goal assignments,
+            or set up multi-scenario batch experiments before comparing <strong>Prioritized Space-Time A*</strong>,
+            <strong>Conflict-Based Search (CBS)</strong>, and <strong>Multi-Agent PPO (MAPPO)</strong>.
+          </p>
+        </div>
+        <div class="banner-actions">
+          <button class="button primary" id="hero-run-compare" type="button">▶ Run Comparison &amp; Open Simulation</button>
+          <button class="button ghost" id="goto-sim-btn" type="button">Go to Simulation View →</button>
         </div>
       </div>
-    </div>
-  </section>
 
-  <!-- ======================================== STEP 1 & 2: WORKSPACE EDITOR -->
-  <section id="workspace" class="workspace-section">
-    <div class="wrap">
+      <!-- Part A: Interactive Problem & Scenario Setup -->
       <div class="section-head">
         <div>
-          <h2>01. Interactive 2D Problem Configuration</h2>
+          <h2>A. Interactive 2D Scenario &amp; Agent Configuration</h2>
           <p class="sub">
-            Select a reproducible 2D benchmark map or customize grid dimensions, toggle obstacle cells, and place distinct start and goal coordinates for each agent.
+            Select a benchmark scenario family or edit the 2D occupancy grid directly. Valid edits are preserved across all pages.
           </p>
         </div>
       </div>
@@ -94,13 +98,13 @@
               <input type="range" id="agents" min="1" max="10" value="4">
             </div>
             <div class="control-group">
-              <label for="seed">Instance Seed (<output id="seed-out">0</output>)</label>
+              <label for="seed">Scenario Seed (<output id="seed-out">0</output>)</label>
               <input type="range" id="seed" min="0" max="40" value="0">
             </div>
           </div>
 
           <div class="button-row">
-            <button class="button ghost small-btn" id="regenerate" type="button">⟳ New Seeded Map</button>
+            <button class="button ghost small-btn" id="regenerate" type="button">⟳ Next Scenario Seed</button>
             <button class="button ghost small-btn" id="resize-apply" type="button">Resize Empty Grid</button>
             <button class="button ghost small-btn" id="clear-walls" type="button">Clear Interior Walls</button>
           </div>
@@ -138,16 +142,22 @@
             </div>
           </div>
 
-          <div class="control-group">
-            <label>MAPPO Action Selection Mode</label>
-            <div class="segmented" id="mappo-mode-group" role="group" aria-label="MAPPO rollout mode">
-              <button type="button" data-mode="sampled" aria-pressed="true">Sampled (Stochastic)</button>
-              <button type="button" data-mode="greedy" aria-pressed="false">Greedy (Argmax)</button>
+          <div class="control-row-2">
+            <div class="control-group">
+              <label>MAPPO Evaluation Mode</label>
+              <div class="segmented" id="mappo-mode-group" role="group" aria-label="MAPPO rollout mode">
+                <button type="button" data-mode="sampled" aria-pressed="true">Sampled</button>
+                <button type="button" data-mode="greedy" aria-pressed="false">Greedy</button>
+              </div>
             </div>
-            <span class="hint">
-              Sampled action selection breaks deterministic period-2 symmetries; Greedy takes argmax actions.
-            </span>
+            <div class="control-group">
+              <label for="mappo-eval-seed">MAPPO Eval Seed</label>
+              <input type="number" id="mappo-eval-seed" class="number-input" min="0" max="9999" value="0">
+            </div>
           </div>
+          <span class="hint">
+            Scenario seed controls map &amp; start/goal generation; MAPPO Eval Seed controls stochastic policy sampling.
+          </span>
 
           <div class="control-group">
             <label for="mappo-train-steps">MAPPO On-Instance Training (Optional)</label>
@@ -165,7 +175,7 @@
           </div>
 
           <div class="action-stack">
-            <button class="button primary full-width" id="run-compare" type="button">▶ Run Comparison (All 3 Algorithms)</button>
+            <button class="button primary full-width" id="run-compare" type="button">▶ Run All 3 Algorithms &amp; View Simulation</button>
             <button class="button ghost full-width" id="run-single" type="button">Run Selected Algorithm Only</button>
           </div>
         </aside>
@@ -222,10 +232,10 @@
               </div>
 
               <div class="legend-box">
-                <h4>Visual Legend</h4>
+                <h4>Visual Legend &amp; One-Shot Semantics</h4>
                 <ul class="legend-list">
-                  <li><span class="legend-swatch swatch-start"></span> <strong>Filled Disc (A, B…)</strong>: Agent current / start position</li>
-                  <li><span class="legend-swatch swatch-goal"></span> <strong>Open Coloured Ring</strong>: Assigned goal position</li>
+                  <li><span class="legend-swatch swatch-start"></span> <strong>Filled Disc (A, B…)</strong>: Agent position (halo ring when locked at goal)</li>
+                  <li><span class="legend-swatch swatch-goal"></span> <strong>Open Coloured Ring</strong>: Assigned goal cell (blocks other agents once occupied)</li>
                   <li><span class="legend-swatch swatch-wall"></span> <strong>Dark Block</strong>: Impassable obstacle cell</li>
                   <li><span class="legend-swatch swatch-rail"></span> <strong>Coloured Line</strong>: Planned trajectory / rollout path</li>
                   <li><span class="legend-swatch swatch-conflict">✕</span> <strong>Red Cross</strong>: Detected vertex or edge-swap conflict</li>
@@ -235,19 +245,100 @@
           </div>
         </div>
       </div>
+
+      <!-- Part B: Batch Experiment Configuration (on Page 1 as required) -->
+      <div class="section-head" style="margin-top: 32px;">
+        <div>
+          <h2>B. Reproducible Batch Experiment Configuration</h2>
+          <p class="sub">
+            Configure multi-scenario, multi-agent-count, and multi-seed batch experiments. Scenario seeds reproduce exact maps and start/goal placements; MAPPO evaluation seeds are recorded separately.
+          </p>
+        </div>
+      </div>
+
+      <div class="batch-controls card">
+        <div class="batch-config-grid">
+          <div class="control-group">
+            <label>1. Scenario Families (Select One or More)</label>
+            <div class="checkbox-grid" id="bench-scenarios-group"></div>
+            <div class="mini-btn-row">
+              <button type="button" class="button ghost tiny-btn" id="bench-select-all-scenarios">Select All 6</button>
+              <button type="button" class="button ghost tiny-btn" id="bench-select-default-scenarios">Standard Subset</button>
+            </div>
+          </div>
+
+          <div class="control-group">
+            <label>2. Agent Counts (Select One or More)</label>
+            <div class="checkbox-grid compact-checks" id="bench-agents-checks">
+              <label class="check-pill"><input type="checkbox" value="2" checked> 2 agents</label>
+              <label class="check-pill"><input type="checkbox" value="3"> 3 agents</label>
+              <label class="check-pill"><input type="checkbox" value="4" checked> 4 agents</label>
+              <label class="check-pill"><input type="checkbox" value="5"> 5 agents</label>
+              <label class="check-pill"><input type="checkbox" value="6" checked> 6 agents</label>
+              <label class="check-pill"><input type="checkbox" value="8"> 8 agents</label>
+            </div>
+            <span class="hint">Evaluates all 3 algorithms on each selected agent count.</span>
+          </div>
+
+          <div class="control-group">
+            <label>3. Scenario Seed Range &amp; MAPPO Evaluation</label>
+            <div class="control-row-2">
+              <div class="control-group">
+                <label for="bench-seed-start">Start Seed</label>
+                <input type="number" id="bench-seed-start" class="number-input" min="0" max="100" value="0">
+              </div>
+              <div class="control-group">
+                <label for="bench-seeds">Seed Count</label>
+                <select id="bench-seeds">
+                  <option value="1">1 seed</option>
+                  <option value="2">2 seeds</option>
+                  <option value="3" selected>3 seeds</option>
+                  <option value="5">5 seeds</option>
+                </select>
+              </div>
+            </div>
+            <div class="control-row-2" style="margin-top: 6px;">
+              <div class="control-group">
+                <label for="bench-mappo-mode">MAPPO Mode</label>
+                <select id="bench-mappo-mode">
+                  <option value="sampled" selected>Sampled Rollout</option>
+                  <option value="greedy">Greedy (Argmax)</option>
+                </select>
+              </div>
+              <div class="control-group">
+                <label for="bench-mappo-seed-offset">MAPPO Seed Offset</label>
+                <input type="number" id="bench-mappo-seed-offset" class="number-input" min="0" max="9999" value="1000">
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="batch-actions">
+          <button class="button primary" id="run-bench" type="button">▶ Run Batch Experiment &amp; Open Results</button>
+          <button class="button ghost" id="goto-results-btn" type="button">View Latest Results &amp; Charts →</button>
+          <span class="hint" id="bench-status">Ready — configure sweep parameters above and click Run Batch Experiment.</span>
+        </div>
+      </div>
     </div>
   </section>
 
-  <!-- =============================== STEP 3 & 4: SIDE-BY-SIDE COMPARISON -->
-  <section id="comparison" class="comparison-section">
+  <!-- ===================================================================== -->
+  <!-- PAGE 2: SIMULATION & EXECUTION LOGS                                   -->
+  <!-- ===================================================================== -->
+  <section id="page-simulation" class="page-view" data-page="simulation" hidden>
     <div class="wrap">
-      <div class="section-head">
+      <div class="page-banner">
         <div>
-          <h2>02. Synchronized Three-Algorithm Comparison</h2>
-          <p class="sub">
-            All three panels replay on a common timeline (<em>t</em> = 0 … <em>H</em>) for the exact same 2D grid,
-            starts, goals, and collision semantics.
+          <p class="eyebrow">Step 2 of 3 · Side-by-Side Execution &amp; Algorithm Traces</p>
+          <h1>Synchronized 3-Algorithm Simulation &amp; Execution Logs</h1>
+          <p class="lede" id="sim-problem-summary">
+            Replaying Prioritized Space-Time A*, Conflict-Based Search (CBS), and Multi-Agent PPO (MAPPO) on a shared timeline (t = 0 … H) under identical one-shot stay-at-goal semantics.
           </p>
+        </div>
+        <div class="banner-actions">
+          <button class="button ghost" type="button" data-nav-page="setup">← Back to Setup &amp; Editor</button>
+          <button class="button primary" id="sim-rerun-compare" type="button">↻ Re-Run All 3 Algorithms</button>
+          <button class="button ghost" type="button" data-nav-page="results">View Metrics &amp; Analysis →</button>
         </div>
       </div>
 
@@ -275,7 +366,7 @@
         </div>
       </div>
 
-      <!-- 3 Side-by-Side Comparison Panels -->
+      <!-- 3 Side-by-Side Comparison Panels + Dedicated Per-Algorithm Execution Logs -->
       <div class="comparison-panels">
         <!-- Panel 1: Prioritized A* -->
         <article class="comp-panel card" id="panel-card-prioritized">
@@ -296,6 +387,14 @@
             <div><span class="k">Validity</span><span class="v" id="mini-valid-prioritized">—</span></div>
           </div>
           <p class="comp-note" id="note-prioritized">Click “Run Comparison” to evaluate Prioritized Space-Time A*.</p>
+
+          <div class="algo-log-box">
+            <div class="algo-log-head">
+              <h4>Prioritized A* Execution Trace</h4>
+              <span class="log-count" id="log-count-prioritized">0 events</span>
+            </div>
+            <div class="algo-log" id="log-prioritized" aria-live="polite"></div>
+          </div>
         </article>
 
         <!-- Panel 2: Conflict-Based Search -->
@@ -317,6 +416,14 @@
             <div><span class="k">Validity</span><span class="v" id="mini-valid-cbs">—</span></div>
           </div>
           <p class="comp-note" id="note-cbs">Click “Run Comparison” to evaluate Conflict-Based Search.</p>
+
+          <div class="algo-log-box">
+            <div class="algo-log-head">
+              <h4>CBS Constraint Tree &amp; Conflict Log</h4>
+              <span class="log-count" id="log-count-cbs">0 events</span>
+            </div>
+            <div class="algo-log" id="log-cbs" aria-live="polite"></div>
+          </div>
         </article>
 
         <!-- Panel 3: MAPPO -->
@@ -324,7 +431,7 @@
           <div class="comp-panel-head">
             <div>
               <h3>3. Multi-Agent PPO (MAPPO)</h3>
-              <p class="comp-subtitle">Centralized critic training, decentralized local execution</p>
+              <p class="comp-subtitle">Centralized critic training, decentralized local rollout</p>
             </div>
             <span class="status-label" id="badge-mappo">Not run</span>
           </div>
@@ -338,20 +445,54 @@
             <div><span class="k">Validity</span><span class="v" id="mini-valid-mappo">—</span></div>
           </div>
           <p class="comp-note" id="note-mappo">Click “Run Comparison” to evaluate the trained MAPPO policy.</p>
+
+          <div class="algo-log-box">
+            <div class="algo-log-head">
+              <h4>MAPPO Step-by-Step Rollout &amp; Goal Lock Log</h4>
+              <span class="log-count" id="log-count-mappo">0 events</span>
+            </div>
+            <div class="algo-log" id="log-mappo" aria-live="polite"></div>
+          </div>
         </article>
+      </div>
+
+      <!-- Unified System Audit Summary Log -->
+      <div class="card" style="margin-top: 18px;">
+        <div class="algo-log-head">
+          <h3 class="panel-title" style="margin: 0;">Cross-Algorithm Execution Summary Log</h3>
+          <span class="hint">Combined run status and formal verification summary</span>
+        </div>
+        <div class="log" id="log" aria-live="polite" style="margin-top: 8px; height: 110px;"></div>
       </div>
     </div>
   </section>
 
-  <!-- ============================ STEP 5: COMPARATIVE METRICS & VALIDATION -->
-  <section id="validation" class="validation-section">
+  <!-- ===================================================================== -->
+  <!-- PAGE 3: RESULTS, VALIDATION & BATCH ANALYSIS                          -->
+  <!-- ===================================================================== -->
+  <section id="page-results" class="page-view" data-page="results" hidden>
     <div class="wrap">
+      <div class="page-banner">
+        <div>
+          <p class="eyebrow">Step 3 of 3 · Quantitative Verification &amp; Batch Benchmarks</p>
+          <h1>Comparative Metrics, Formal Validation &amp; Batch Analysis</h1>
+          <p class="lede">
+            Inspect formal 6-point solution validation audits for the active problem instance, analyze aggregate batch experiment scaling curves, and export reproducible CSV tables.
+          </p>
+        </div>
+        <div class="banner-actions">
+          <button class="button ghost" type="button" data-nav-page="setup">← Edit Setup &amp; Batch Config</button>
+          <button class="button ghost" type="button" data-nav-page="simulation">← View Simulation &amp; Logs</button>
+          <button class="button primary" id="export-csv" type="button" disabled>⬇ Download Batch CSV</button>
+        </div>
+      </div>
+
+      <!-- Part A: Active Instance Comparative Metrics & Formal Validation -->
       <div class="section-head">
         <div>
-          <h2>03. Comparative Metrics &amp; Formal Solution Validation</h2>
+          <h2>A. Active Problem Instance — Metrics &amp; Formal Solution Validation Audit</h2>
           <p class="sub">
-            Every path or rollout is audited by <code>pymapf.core.validate_solution</code> against the problem's
-            obstacle matrix, start/goal assignments, cardinal movement rules, and conflict constraints.
+            Audited by <code>pymapf.core.validate_solution</code> against obstacle bounds, cardinal movement rules, vertex/edge-swap conflict freedom, and one-shot stay-at-goal occupancy.
           </p>
         </div>
       </div>
@@ -402,7 +543,7 @@
                   <td id="tbl-ms-mappo">—</td>
                 </tr>
                 <tr>
-                  <td>Search Expansions</td>
+                  <td>Search Expansions / Rollout Steps</td>
                   <td id="tbl-exp-prioritized">—</td>
                   <td id="tbl-exp-cbs">—</td>
                   <td id="tbl-exp-mappo">—</td>
@@ -432,7 +573,7 @@
 
         <!-- Formal Validation Audit Checklist -->
         <div class="card">
-          <h3 class="panel-title">Formal Solution Validation Audit</h3>
+          <h3 class="panel-title">Formal Solution Validation Audit (6 Criteria)</h3>
           <div class="table-scroll">
             <table class="results" id="validation-audit-table">
               <thead>
@@ -485,67 +626,30 @@
           </div>
 
           <div class="log-wrap">
-            <h4>Execution &amp; Conflict Audit Log</h4>
-            <div class="log" id="log" aria-live="polite"></div>
+            <h4>Validation Violations &amp; Conflict Details</h4>
+            <div class="log" id="validation-violations-box" style="height: 115px;"></div>
           </div>
         </div>
       </div>
-    </div>
-  </section>
 
-  <!-- ===================================== STEP 6: BATCH EXPERIMENTS -->
-  <section id="experiments" class="experiments-section">
-    <div class="wrap">
-      <div class="section-head">
-        <div>
-          <h2>04. Reproducible Batch Experiments &amp; Aggregate Analysis</h2>
-          <p class="sub">
-            Evaluate Prioritized Space-Time A*, CBS, and MAPPO across multiple seeded problem instances, inspect
-            aggregate success rates and cost ratios, and export CSV tables for your research report.
-          </p>
-        </div>
-      </div>
-
-      <div class="batch-controls card">
-        <div class="batch-inputs">
-          <div class="control-group">
-            <label for="bench-scenario">2D Scenario Family</label>
-            <select id="bench-scenario"></select>
+      <!-- Part B: Batch Experiment Aggregate Summary & Charts -->
+      <div class="section-head" style="margin-top: 32px;">
+        <div class="section-head-row">
+          <div>
+            <h2>B. Reproducible Batch Experiment Results &amp; Scaling Analysis</h2>
+            <p class="sub" id="results-batch-subtitle">
+              Aggregate metrics across shared seeded problem instances. Configure scenarios, agent counts, and seeds on Page 1.
+            </p>
           </div>
-          <div class="control-group">
-            <label for="bench-agents">Agent Count Sweep</label>
-            <select id="bench-agents">
-              <option value="2,3,4">2, 3, 4 agents (Fast)</option>
-              <option value="2,4,6" selected>2, 4, 6 agents (Standard)</option>
-              <option value="2,4,6,8">2, 4, 6, 8 agents (Extended)</option>
-            </select>
+          <div class="button-row">
+            <button class="button ghost small-btn" id="results-rerun-batch" type="button">↻ Re-Run Batch Sweep</button>
+            <button class="button ghost small-btn" id="results-export-csv" type="button" disabled>⬇ Export CSV</button>
           </div>
-          <div class="control-group">
-            <label for="bench-seeds">Seeds per Agent Count</label>
-            <select id="bench-seeds">
-              <option value="2">2 seeds (0, 1)</option>
-              <option value="3" selected>3 seeds (0, 1, 2)</option>
-              <option value="5">5 seeds (0, 1, 2, 3, 4)</option>
-            </select>
-          </div>
-          <div class="control-group">
-            <label for="bench-mappo-mode">MAPPO Evaluation Mode</label>
-            <select id="bench-mappo-mode">
-              <option value="sampled" selected>Sampled Rollout</option>
-              <option value="greedy">Greedy (Argmax) Rollout</option>
-            </select>
-          </div>
-        </div>
-
-        <div class="batch-actions">
-          <button class="button primary" id="run-bench" type="button">▶ Run Batch Experiment</button>
-          <button class="button ghost" id="export-csv" type="button" disabled>⬇ Download CSV Report</button>
-          <span class="hint" id="bench-status">Ready — configure sweep parameters and click Run Batch Experiment.</span>
         </div>
       </div>
 
       <!-- Aggregate Summary Table -->
-      <div class="card" style="margin-top: 18px;">
+      <div class="card">
         <h3 class="panel-title">Aggregate Summary Across Shared Instances</h3>
         <div class="table-scroll">
           <table class="results" id="bench-summary-table">
@@ -563,7 +667,7 @@
               </tr>
             </thead>
             <tbody id="bench-summary-body">
-              <tr><td colspan="9" class="muted-cell">Run a batch experiment above to populate aggregate statistics.</td></tr>
+              <tr><td colspan="9" class="muted-cell">Run a batch experiment to populate aggregate statistics.</td></tr>
             </tbody>
           </table>
         </div>
@@ -588,62 +692,44 @@
         </div>
         <div class="chart-card">
           <h3>Per-Instance Trial Log</h3>
-          <p>Every individual problem run in the current batch sweep.</p>
-          <div class="table-scroll"><table class="results" id="bench-table"></table></div>
+          <p>Every individual problem run in the current batch sweep (including scenario seed &amp; MAPPO eval seed).</p>
+          <div class="table-scroll" style="max-height: 230px;"><table class="results" id="bench-table"></table></div>
         </div>
       </div>
-    </div>
-  </section>
 
-  <!-- ============================ STEP 7: METHODOLOGY & REPRODUCIBILITY -->
-  <section id="methodology" class="methodology-section">
-    <div class="wrap">
-      <div class="section-head">
+      <!-- Part C: Methodology & Reproducible Code -->
+      <div class="section-head" style="margin-top: 32px;">
         <div>
-          <h2>05. Movement Rules, Collision Semantics &amp; MAPPO Evaluation Notes</h2>
-          <p class="sub">
-            Explicit specification of the formal rules enforced across all three algorithms and the distinction
-            between search planning time and reinforcement learning training/inference time.
-          </p>
+          <h2>C. Formal Movement Rules, One-Shot Goal Semantics &amp; Reproducible Code</h2>
         </div>
       </div>
 
       <div class="bench-grid">
         <div class="chart-card">
-          <h3>Shared 2D Problem &amp; Collision Rules</h3>
+          <h3>Shared 2D Problem &amp; One-Shot Goal-Locking Rules</h3>
           <p style="color:var(--ink-2);margin-top:8px;">
             <strong>Discrete 4-Connected Grid:</strong> Time advances in discrete steps <em>t = 0, 1, …</em>.
-            At each step, an agent either waits on its current cell or moves to one of the 4 cardinal neighbors
-            (up, down, left, right). Diagonal movement and corner-cutting are disabled across all methods.
+            At each step, an agent either waits on its current cell or moves to one of the 4 cardinal neighbors.
           </p>
           <p style="color:var(--ink-2);margin-top:8px;">
-            <strong>Vertex &amp; Edge-Swap Conflicts:</strong> Two agents may never occupy the same cell at the
-            same timestep <em>t</em> (vertex conflict) and may never swap adjacent cells between <em>t</em> and
-            <em>t + 1</em> (edge conflict). In <code>MAPFEnv</code>, conflicting moves are refused and cascade to a
-            fixed point so rollouts never violate physical occupancy.
-          </p>
-          <p style="color:var(--ink-2);margin-top:8px;">
-            <strong>Stay-at-Goal Occupancy:</strong> Agents remain on their goal cells after arrival. A solution is
-            solved and valid only if every agent reaches its assigned goal at the end of the horizon and no
-            collision occurs with parked or moving agents.
+            <strong>One-Shot Stay-at-Goal Occupancy:</strong> Once an agent reaches its assigned goal cell, it transitions
+            to the <em>finished</em> state and remains stationary at its goal for the remainder of the episode. Occupied
+            goals block other agents from entering them. An episode is recorded as <strong>Solved</strong> only when all
+            agents reach and remain at their goals before the horizon expires.
           </p>
         </div>
 
         <div class="chart-card">
           <h3>MAPPO Training vs. Evaluation Time</h3>
           <p style="color:var(--ink-2);margin-top:8px;">
-            <strong>Architecture (Yu et al., 2022):</strong> MAPPO uses <em>Centralized Training with Decentralized
-            Execution (CTDE)</em>. During training, the value critic observes the normalized global state
-            (<code>5 × N + 1</code> features: all agent positions, goals, and step fraction), while the shared policy
-            actor observes a <code>9×9</code> egocentric 4-channel window plus goal bearing/distance (327 features).
+            <strong>Centralized Training, Decentralized Execution (CTDE):</strong> The shared policy actor observes a
+            <code>9×9</code> egocentric 4-channel window plus goal vector (327 features), while the centralized critic
+            observes the global joint state during PPO updates.
           </p>
           <p style="color:var(--ink-2);margin-top:8px;">
-            <strong>Why Training &amp; Inference Time Are Separated:</strong> Search algorithms (Prioritized A* and CBS)
-            compute a plan online from scratch for each problem instance. By contrast, MAPPO invests compute
-            offline during policy training (124,928 environment steps across curriculum instances, or optional
-            on-instance training) and executes forward neural network inference at test time. The metrics table
-            reports <strong>Offline/Instance Training Time</strong> and <strong>Rollout Inference Time</strong> in
-            separate rows so they are never conflated.
+            <strong>Separate Timing Accounting:</strong> Search planners (Prioritized A* and CBS) plan online per instance,
+            whereas MAPPO invests compute during training and executes forward policy rollouts at evaluation time. Both
+            metrics are reported distinctly in all tables and exports.
           </p>
         </div>
       </div>
@@ -659,11 +745,11 @@
 
 <footer>
   <div class="wrap">
-    <span>PyMAPF 2D Research &amp; Simulation Platform — Adapted from PyMAPF (MIT / Apache-2.0) for University Multi-Agent Pathfinding Research.</span>
+    <span>PyMAPF 2D Research &amp; Simulation Platform — Adapted from PyMAPF (MIT / Apache-2.0) for Multi-Agent Pathfinding Research.</span>
     <nav>
-      <a href="#workspace">Workspace</a>
-      <a href="#batch">Batch Experiments</a>
-      <a href="#notes">Methodology</a>
+      <a href="#setup" data-nav-page="setup">01. Setup &amp; Workspace</a>
+      <a href="#simulation" data-nav-page="simulation">02. Simulation &amp; Logs</a>
+      <a href="#results" data-nav-page="results">03. Results &amp; Analysis</a>
       <a href="assets/mappo-policy.json">MAPPO Policy Checkpoint</a>
     </nav>
   </div>

@@ -2,12 +2,13 @@
  * app.js — PyMAPF 2D Multi-Agent Pathfinding Research & Simulation Platform.
  *
  * Drives:
- *  1. Interactive 2D Grid & Multi-Agent Editor with strict invariant guards;
+ *  1. Three-page research workflow:
+ *     - Page 1 (setup): Interactive 2D Grid & Multi-Agent Editor + Batch Experiment Config
+ *     - Page 2 (simulation): Synchronized 3-Algorithm Playback & Algorithm-Specific Execution Logs
+ *     - Page 3 (results): Comparative Metrics, 6-Point Formal Validation Audit, Batch Charts & CSV Export
  *  2. Side-by-side execution and synchronized timeline playback for
- *     Prioritized Space-Time A*, Conflict-Based Search (CBS), and MAPPO;
- *  3. Formal solution validation audit (6 criteria) and comparative metrics;
- *  4. Batch experiment sweeps across scenarios/seeds with SVG charts & CSV export;
- *  5. Native Python server API integration (/api/*) with automatic fallback to
+ *     Prioritized Space-Time A*, Conflict-Based Search (CBS), and MAPPO under one-shot stay-at-goal semantics;
+ *  3. Native Python server API integration (/api/*) with automatic fallback to
  *     the built-in browser engine + pre-trained MAPPO checkpoint when served statically.
  */
 
@@ -15,8 +16,6 @@ import {
   SCENARIOS,
   agentName,
   buildScenario,
-  gridFromMatrix,
-  isFree,
   mappoRollout,
   problemFromState,
   solve,
@@ -48,14 +47,16 @@ const ALGORITHM_LABELS = {
 const ALGORITHM_BLURBS = {
   prioritized: 'Sequential Space-Time A* with reservation table. Fast baseline, incomplete on tight bottlenecks.',
   cbs: 'Bi-level Conflict-Based Search over constraint tree. Complete and provably sum-of-costs optimal.',
-  mappo: 'Centralized-critic Multi-Agent PPO policy using 9×9 local observations and goal vectors.',
+  mappo: 'Centralized-critic Multi-Agent PPO policy using 9×9 local observations and one-shot goal locking.',
 };
 
 /* --------------------------------------------------------------- state --- */
 
 const state = {
-  scenario: 'bottleneck',
+  activePage: 'setup',
+  scenario: 'corner_swap',
   seed: 0,
+  mappoEvalSeed: 0,
   agents: 4,
   algorithm: 'cbs',
   heuristic: 'manhattan',
@@ -85,6 +86,51 @@ const state = {
   batchData: null,
 };
 
+/* --------------------------------------------------- 3-Page Navigation --- */
+
+function normalizePageName(raw) {
+  const clean = String(raw || '').replace(/^#/, '').trim().toLowerCase();
+  if (clean === 'simulation' || clean === 'comparison') return 'simulation';
+  if (clean === 'results' || clean === 'validation' || clean === 'experiments' || clean === 'methodology') {
+    return 'results';
+  }
+  return 'setup';
+}
+
+function navigateToPage(pageName, { updateHash = true } = {}) {
+  const target = normalizePageName(pageName);
+  state.activePage = target;
+
+  document.querySelectorAll('.page-view').forEach((sec) => {
+    const isMatch = sec.dataset.page === target;
+    sec.hidden = !isMatch;
+    sec.classList.toggle('active-page', isMatch);
+  });
+
+  document.querySelectorAll('.nav-tab').forEach((btn) => {
+    const isMatch = btn.dataset.navPage === target;
+    btn.classList.toggle('active', isMatch);
+    btn.setAttribute('aria-current', isMatch ? 'page' : 'false');
+  });
+
+  if (updateHash) {
+    const nextHash = `#${target}`;
+    if (window.location.hash !== nextHash) {
+      history.replaceState(null, '', nextHash);
+    }
+  }
+
+  window.scrollTo({ top: 0, behavior: 'instant' });
+
+  // Re-measure and redraw canvases/charts once the target page is visible
+  requestAnimationFrame(() => {
+    drawAllCanvases();
+    if (target === 'results' && state.batchData) {
+      renderBatchResults(state.batchData);
+    }
+  });
+}
+
 /* ------------------------------------------------------------- logging --- */
 
 function clearLog() {
@@ -100,6 +146,35 @@ function log(text, className = '') {
   line.textContent = text;
   el.appendChild(line);
   el.scrollTop = el.scrollHeight;
+}
+
+function renderAlgorithmExecutionLog(algo, entries) {
+  const box = $(`log-${algo}`);
+  const countEl = $(`log-count-${algo}`);
+  if (!box) return;
+  box.innerHTML = '';
+  const list = Array.isArray(entries) ? entries : [];
+  if (countEl) {
+    countEl.textContent = `${list.length} ${list.length === 1 ? 'event' : 'events'}`;
+  }
+  if (!list.length) {
+    const empty = document.createElement('div');
+    empty.className = 'branch';
+    empty.textContent = 'No execution events recorded yet. Run the algorithm to inspect its step-by-step trace.';
+    box.appendChild(empty);
+    return;
+  }
+  for (const item of list) {
+    const row = document.createElement('div');
+    if (typeof item === 'string') {
+      row.textContent = item;
+    } else if (item && typeof item === 'object') {
+      row.className = item.kind || 'step';
+      row.textContent = item.text || JSON.stringify(item);
+    }
+    box.appendChild(row);
+  }
+  box.scrollTop = 0;
 }
 
 function setFeedback(text, kind = 'neutral') {
@@ -128,7 +203,8 @@ function positionAt(path, t) {
 
 function fitCanvas(canvas, rows, cols, maxHeight = 460) {
   const dpr = window.devicePixelRatio || 1;
-  const parentWidth = Math.max(220, (canvas.parentElement?.clientWidth || 360) - 20);
+  const rawWidth = canvas.parentElement?.clientWidth || 360;
+  const parentWidth = Math.max(220, rawWidth - 20);
   const cell = clamp(Math.floor(Math.min(parentWidth / cols, maxHeight / rows)), 10, 44);
   const width = cell * cols;
   const height = cell * rows;
@@ -184,7 +260,7 @@ function drawGridAndAgents(canvas, paths, currentT, options = {}) {
     return colors[(idx >= 0 ? idx : 0) % colors.length];
   };
 
-  // 3. Goal markers (open ring + subtle center dot)
+  // 3. Goal markers (open ring + subtle center label)
   state.agentList.forEach((agent, index) => {
     const color = colors[index % colors.length];
     const gx = center(agent.goal[1]);
@@ -246,11 +322,16 @@ function drawGridAndAgents(canvas, paths, currentT, options = {}) {
     const color = colors[index % colors.length];
     const path = hasPaths ? paths[agent.name] : null;
     const [r, c] = path && path.length ? positionAt(path, currentT) : agent.start;
-    const arrived = path && path.length
-      ? currentT >= path.length - 1
-        && path[path.length - 1][0] === agent.goal[0]
-        && path[path.length - 1][1] === agent.goal[1]
-      : (agent.start[0] === agent.goal[0] && agent.start[1] === agent.goal[1]);
+
+    // Determine whether agent has arrived and locked at its goal by currentT
+    let arrived = false;
+    if (path && path.length) {
+      const stepIdx = Math.min(Math.floor(Math.max(0, currentT)), path.length - 1);
+      const posAtStep = path[stepIdx];
+      arrived = posAtStep[0] === agent.goal[0] && posAtStep[1] === agent.goal[1];
+    } else {
+      arrived = agent.start[0] === agent.goal[0] && agent.start[1] === agent.goal[1];
+    }
 
     const x = center(c);
     const y = center(r);
@@ -278,7 +359,8 @@ function drawGridAndAgents(canvas, paths, currentT, options = {}) {
       ctx.beginPath();
       ctx.arc(x, y, cell * 0.42, 0, Math.PI * 2);
       ctx.strokeStyle = color;
-      ctx.globalAlpha = 0.4;
+      ctx.lineWidth = Math.max(1.6, cell * 0.08);
+      ctx.globalAlpha = 0.55;
       ctx.stroke();
       ctx.globalAlpha = 1;
     }
@@ -313,23 +395,19 @@ function drawGridAndAgents(canvas, paths, currentT, options = {}) {
 }
 
 function drawAllCanvases() {
-  // Master editor board shows the selected single algorithm's paths if present, or CBS/Prioritized
-  const primaryResult = state.comparison[state.algorithm]
-    || state.comparison.cbs
-    || state.comparison.prioritized
-    || state.comparison.mappo;
+  // Master editor board shows the clean problem setup on Page 1
   drawGridAndAgents(
     $('board'),
-    primaryResult?.paths || null,
-    state.t,
+    null,
+    0,
     {
       maxHeight: 460,
       highlightActive: true,
-      conflict: primaryResult?.validation?.first_conflict || null,
+      conflict: null,
     },
   );
 
-  // 3 Side-by-Side Comparison Canvases
+  // 3 Side-by-Side Comparison Canvases on Page 2
   for (const algo of ALGORITHMS) {
     const res = state.comparison[algo];
     drawGridAndAgents(
@@ -359,7 +437,16 @@ function syncRosterAndControls() {
   $('agents-out').textContent = String(state.agentList.length);
   $('seed').value = String(state.seed);
   $('seed-out').textContent = String(state.seed);
+  if ($('mappo-eval-seed')) {
+    $('mappo-eval-seed').value = String(state.mappoEvalSeed);
+  }
   $('grid-summary').textContent = `${rows}×${cols} · ${state.agentList.length} agents`;
+
+  const specLabel = SCENARIOS[state.scenario]?.label || state.scenario;
+  const simSummary = $('sim-problem-summary');
+  if (simSummary) {
+    simSummary.textContent = `Active instance: ${specLabel} (${rows}×${cols} grid, ${state.agentList.length} agents, scenario seed=${state.seed}, MAPPO mode=${state.mappoMode}, MAPPO eval seed=${state.mappoEvalSeed}).`;
+  }
 
   if (state.activeAgentIndex >= state.agentList.length) {
     state.activeAgentIndex = Math.max(0, state.agentList.length - 1);
@@ -426,6 +513,7 @@ function resetComparisonResults() {
     $(`mini-ms-${algo}`).textContent = '—';
     $(`mini-time-${algo}`).textContent = '—';
     $(`mini-valid-${algo}`).textContent = '—';
+    renderAlgorithmExecutionLog(algo, []);
   }
   drawAllCanvases();
 }
@@ -433,10 +521,15 @@ function resetComparisonResults() {
 /* ------------------------------------------- Synchronized Playback --- */
 
 function syncTransportToResults() {
-  const makespans = ALGORITHMS
-    .map((a) => state.comparison[a]?.makespan ?? 0)
-    .filter((m) => Number.isFinite(m) && m > 0);
-  const horizon = makespans.length ? Math.max(...makespans) : 0;
+  const pathHorizons = ALGORITHMS.map((a) => {
+    const res = state.comparison[a];
+    if (!res) return 0;
+    if (Number.isFinite(res.makespan) && res.makespan > 0) return res.makespan;
+    const paths = res.paths || {};
+    const lens = Object.values(paths).map((p) => Math.max(0, (p?.length || 1) - 1));
+    return lens.length ? Math.max(...lens) : 0;
+  });
+  const horizon = pathHorizons.length ? Math.max(...pathHorizons) : 0;
   state.horizon = horizon;
   state.t = 0;
 
@@ -506,6 +599,8 @@ function formatBoolCell(el, flag, passText = 'PASS', failText = 'FAIL') {
 
 function updateComparisonUI() {
   const cbsCost = state.comparison.cbs?.solved ? (state.comparison.cbs.sum_of_costs ?? state.comparison.cbs.sumOfCosts) : null;
+  const violationsBox = $('validation-violations-box');
+  if (violationsBox) violationsBox.innerHTML = '';
 
   for (const algo of ALGORITHMS) {
     const res = state.comparison[algo];
@@ -513,6 +608,7 @@ function updateComparisonUI() {
     if (!res) {
       badge.textContent = 'Not run';
       badge.className = 'status-label';
+      renderAlgorithmExecutionLog(algo, []);
       continue;
     }
 
@@ -526,6 +622,9 @@ function updateComparisonUI() {
     } else if (!res.available && res.available !== undefined) {
       badge.textContent = 'Unavailable';
       badge.className = 'status-label warn';
+    } else if (res.truncated) {
+      badge.textContent = '✕ Truncated (Horizon)';
+      badge.className = 'status-label fail';
     } else {
       badge.textContent = '✕ Unsolved / Incomplete';
       badge.className = 'status-label fail';
@@ -539,7 +638,10 @@ function updateComparisonUI() {
     $(`mini-valid-${algo}`).className = `v ${res.valid ? 'cell-pass' : 'cell-fail'}`;
     $(`note-${algo}`).textContent = res.status_reason || (res.solved ? 'All agents reached assigned goals without conflict.' : 'Failed to find a valid joint plan.');
 
-    // Main comparative performance table
+    // Render dedicated algorithm-specific execution log on Page 2
+    renderAlgorithmExecutionLog(algo, res.execution_log || []);
+
+    // Main comparative performance table on Page 3
     formatBoolCell($(`tbl-solved-${algo}`), Boolean(res.solved), 'Solved', 'Unsolved');
     formatBoolCell($(`tbl-valid-${algo}`), Boolean(res.valid), 'Valid', 'Invalid');
     $(`tbl-cost-${algo}`).textContent = cost != null ? String(cost) : '—';
@@ -576,12 +678,28 @@ function updateComparisonUI() {
     formatBoolCell($(`val-edge-${algo}`), val.edge_swap_free);
     formatBoolCell($(`val-goal-${algo}`), val.all_reached_goal);
     formatBoolCell($(`val-occ-${algo}`), val.goal_occupancy_valid);
+
+    if (violationsBox) {
+      const line = document.createElement('div');
+      if (val.valid) {
+        line.className = 'solved';
+        line.textContent = `[${ALGORITHM_LABELS[algo]}] ✓ All 6 formal validation checks passed (0 violations).`;
+      } else {
+        line.className = 'conflict';
+        const vList = (val.violations && val.violations.length)
+          ? val.violations.join(' | ')
+          : (res.status_reason || 'No valid complete plan.');
+        line.textContent = `[${ALGORITHM_LABELS[algo]}] ✕ ${vList}`;
+      }
+      violationsBox.appendChild(line);
+    }
   }
 }
 
 /* ------------------------------------------- Algorithm Execution --- */
 
 function currentProblemPayload() {
+  state.mappoEvalSeed = Number($('mappo-eval-seed')?.value || 0);
   return {
     matrix: state.matrix,
     agents: state.agentList.map((a) => ({
@@ -593,7 +711,81 @@ function currentProblemPayload() {
     time_limit: Number($('time-limit').value || 5.0),
     mappo_mode: state.mappoMode,
     seed: state.seed,
+    mappo_eval_seed: state.mappoEvalSeed,
   };
+}
+
+function buildLocalSearchExecutionLog(algo, problem, sol, runtime, options) {
+  const entries = [];
+  const rows = problem.grid.height;
+  const cols = problem.grid.width;
+  const agentOrder = problem.agents.map((a) => a.name).join(' → ');
+
+  if (algo === 'prioritized') {
+    entries.push({
+      kind: 'init',
+      text: `[INIT] Prioritized Space-Time A* | grid=${rows}x${cols} | priority=[${agentOrder}] | heuristic=${options.heuristic}`,
+    });
+    entries.push({
+      kind: 'step',
+      text: '[RULE] Sequential reservation table: higher-priority trajectories & occupied goals are reserved for all future t.',
+    });
+  } else {
+    entries.push({
+      kind: 'init',
+      text: `[INIT] Conflict-Based Search (CBS) | grid=${rows}x${cols} | agents=${problem.agents.length} | heuristic=${options.heuristic} | budget=${options.timeLimit}s`,
+    });
+  }
+
+  for (const ev of (sol?.traceEvents || [])) {
+    const kind = ev.kind || ev.type;
+    if (kind === 'root') {
+      entries.push({
+        kind: 'step',
+        text: `[ROOT] Initialized search root | agents=[${(ev.agents || []).join(', ')}] | initial sum_of_costs=${ev.cost ?? 0}`,
+      });
+    } else if (kind === 'agent_planned') {
+      const pathLen = ev.length ?? (ev.path ? ev.path.length : 0);
+      const cost = ev.cost ?? Math.max(0, pathLen - 1);
+      entries.push({
+        kind: 'step',
+        text: `[PLAN] Agent ${ev.agent}: space-time A* path found | cost=${cost} (${pathLen} states)`,
+      });
+    } else if (kind === 'expand') {
+      entries.push({
+        kind: 'step',
+        text: `[CT#${ev.node}] Expanded node | cost=${ev.cost} | open=${ev.open ?? 0}`,
+      });
+    } else if (kind === 'conflict') {
+      const cType = ev.type || ev.conflict?.kind || 'vertex';
+      const agentA = ev.a || ev.conflict?.agent_a || '?';
+      const agentB = ev.b || ev.conflict?.agent_b || '?';
+      const tStep = ev.t ?? ev.conflict?.time ?? 0;
+      const cell = ev.cell || ev.conflict?.cell_a || [0, 0];
+      entries.push({
+        kind: 'conflict',
+        text: `[CONFLICT] ${cType} conflict between Agent ${agentA} and Agent ${agentB} at (${cell[0]},${cell[1]}) at t=${tStep}`,
+      });
+    } else if (kind === 'branch') {
+      entries.push({
+        kind: 'branch',
+        text: `[BRANCH] Constrained Agent ${ev.agent} (${ev.constraint || 'conflict'}) → replanned child CT cost=${ev.cost}`,
+      });
+    }
+  }
+
+  if (sol) {
+    entries.push({
+      kind: 'solved',
+      text: `[SOLVED] ✓ Valid joint plan found | sum_of_costs=${sol.sumOfCosts} | makespan=${sol.makespan} | expansions=${sol.expansions} | time=${(runtime * 1000).toFixed(1)}ms`,
+    });
+  } else {
+    entries.push({
+      kind: 'conflict',
+      text: `[FAILED] ✕ No conflict-free plan found within ${options.timeLimit}s budget.`,
+    });
+  }
+  return entries;
 }
 
 function runAlgorithmLocally(algo, payload) {
@@ -607,16 +799,25 @@ function runAlgorithmLocally(algo, payload) {
     return mappoRollout(problem, state.policyData, {
       mappo_mode: payload.mappo_mode,
       seed: payload.seed,
+      mappo_eval_seed: payload.mappo_eval_seed ?? payload.seed,
     });
   }
 
+  const traceEvents = [];
   const started = performance.now();
   const sol = solve(problem, algo, {
     heuristic: payload.heuristic,
     timeLimit: payload.time_limit,
     maxExpansions: 25000,
+    trace: (ev) => traceEvents.push(ev),
   });
   const runtime = (performance.now() - started) / 1000;
+  if (sol) sol.traceEvents = traceEvents;
+
+  const execution_log = buildLocalSearchExecutionLog(algo, problem, sol, runtime, {
+    heuristic: payload.heuristic,
+    timeLimit: payload.time_limit,
+  });
 
   if (!sol) {
     const val = validateSolution(problem, {});
@@ -635,6 +836,7 @@ function runAlgorithmLocally(algo, payload) {
         : 'Prioritized reservation table blocked a lower-priority agent',
       paths: {},
       validation: val,
+      execution_log,
     };
   }
 
@@ -654,10 +856,11 @@ function runAlgorithmLocally(algo, payload) {
       : (val.violations?.[0] || 'Validation failed'),
     paths: sol.paths,
     validation: val,
+    execution_log,
   };
 }
 
-async function runComparison(onlyAlgorithm = null) {
+async function runComparison(onlyAlgorithm = null, { switchPage = false } = {}) {
   if (state.running) return;
   const payload = currentProblemPayload();
   const check = validateProblemSpec(payload);
@@ -667,15 +870,20 @@ async function runComparison(onlyAlgorithm = null) {
     return;
   }
 
+  if (switchPage) {
+    navigateToPage('simulation');
+  }
+
   state.running = true;
   $('run-compare').disabled = true;
   $('run-single').disabled = true;
   $('hero-run-compare').disabled = true;
+  if ($('sim-rerun-compare')) $('sim-rerun-compare').disabled = true;
 
   const targets = onlyAlgorithm ? [onlyAlgorithm] : ALGORITHMS;
   clearLog();
   log(
-    `Running ${onlyAlgorithm ? ALGORITHM_LABELS[onlyAlgorithm] : '3-way comparison'} on ${state.matrix.length}×${state.matrix[0].length} grid (${state.agentList.length} agents, heuristic=${state.heuristic}, MAPPO=${state.mappoMode})…`,
+    `Running ${onlyAlgorithm ? ALGORITHM_LABELS[onlyAlgorithm] : '3-way comparison'} on ${state.matrix.length}×${state.matrix[0].length} grid (${state.agentList.length} agents, scenario_seed=${state.seed}, mappo_mode=${state.mappoMode}, mappo_eval_seed=${state.mappoEvalSeed})…`,
   );
 
   try {
@@ -728,10 +936,11 @@ async function runComparison(onlyAlgorithm = null) {
       }
     }
 
+    syncRosterAndControls();
     updateComparisonUI();
     syncTransportToResults();
     drawAllCanvases();
-    if (state.horizon > 0) {
+    if (state.horizon > 0 && state.activePage === 'simulation') {
       togglePlay();
     }
   } catch (err) {
@@ -742,6 +951,7 @@ async function runComparison(onlyAlgorithm = null) {
     $('run-compare').disabled = false;
     $('run-single').disabled = false;
     $('hero-run-compare').disabled = false;
+    if ($('sim-rerun-compare')) $('sim-rerun-compare').disabled = false;
   }
 }
 
@@ -832,7 +1042,7 @@ function loadScenarioPreset(name = state.scenario) {
 
   syncRosterAndControls();
   resetComparisonResults();
-  setFeedback(`Loaded '${spec.label}' (${state.matrix.length}×${state.matrix[0].length}, ${state.agentList.length} agents, seed ${state.seed}).`, 'ok');
+  setFeedback(`Loaded '${spec.label}' (${state.matrix.length}×${state.matrix[0].length}, ${state.agentList.length} agents, scenario seed ${state.seed}).`, 'ok');
 }
 
 function resizeEmptyGrid() {
@@ -936,7 +1146,6 @@ function removeActiveAgent() {
     return;
   }
   const removed = state.agentList.splice(state.activeAgentIndex, 1)[0];
-  // Rename remaining agents sequentially A, B, C... so indices stay clean
   state.agentList.forEach((a, i) => { a.name = agentName(i); });
   state.activeAgentIndex = Math.max(0, Math.min(state.activeAgentIndex, state.agentList.length - 1));
   state.agents = state.agentList.length;
@@ -1068,6 +1277,7 @@ const ALGO_COLORS = () => ({
 });
 
 function renderLineChart(svg, rows, field, { logScale = false, yLabel = '' } = {}) {
+  if (!svg) return;
   svg.innerHTML = '';
   const W = 420;
   const H = 260;
@@ -1153,6 +1363,7 @@ function renderLineChart(svg, rows, field, { logScale = false, yLabel = '' } = {
 }
 
 function renderSuccessChart(svg, summary) {
+  if (!svg) return;
   svg.innerHTML = '';
   const W = 420;
   const paddingL = 130;
@@ -1214,7 +1425,15 @@ function summarizeLocalBatch(rows) {
 
 function renderBatchResults(batch) {
   state.batchData = batch;
-  $('export-csv').disabled = !batch || !batch.rows?.length;
+  const hasRows = Boolean(batch && batch.rows?.length);
+  $('export-csv').disabled = !hasRows;
+  if ($('results-export-csv')) $('results-export-csv').disabled = !hasRows;
+
+  const subEl = $('results-batch-subtitle');
+  if (subEl && batch) {
+    const scList = (batch.scenarios || [batch.scenario]).join(', ');
+    subEl.textContent = `Evaluated ${batch.rows?.length || 0} trials across scenarios [${scList}], agent counts [${(batch.agent_counts || []).join(', ')}], scenario seeds [${(batch.seeds || []).join(', ')}].`;
+  }
 
   // 1. Aggregate summary table
   const sumBody = $('bench-summary-body');
@@ -1255,8 +1474,10 @@ function renderBatchResults(batch) {
   table.innerHTML = `
     <thead>
       <tr>
+        <th>Scenario</th>
         <th>Agents</th>
-        <th>Seed</th>
+        <th>Scen Seed</th>
+        <th>Eval Seed</th>
         <th>Algorithm</th>
         <th>Solved</th>
         <th>Valid</th>
@@ -1268,8 +1489,10 @@ function renderBatchResults(batch) {
     <tbody>
       ${batch.rows.map((r) => `
         <tr>
+          <td>${SCENARIOS[r.scenario]?.label || r.scenario}</td>
           <td>${r.n_agents}</td>
-          <td>${r.seed}</td>
+          <td>${r.scenario_seed ?? r.seed}</td>
+          <td>${r.mappo_eval_seed != null ? r.mappo_eval_seed : '—'}</td>
           <td>${ALGORITHM_LABELS[r.algorithm] || r.algorithm}</td>
           <td class="${r.solved ? 'cell-pass' : 'cell-fail'}">${r.solved ? '✓' : '✕'}</td>
           <td class="${r.valid ? 'cell-pass' : 'cell-fail'}">${r.valid ? '✓' : '✕'}</td>
@@ -1282,17 +1505,46 @@ function renderBatchResults(batch) {
   `;
 }
 
-async function runBatchExperiment() {
+function getSelectedBatchConfig() {
+  const scenarios = [...document.querySelectorAll('#bench-scenarios-group input[type="checkbox"]:checked')]
+    .map((el) => el.value);
+  const agentCounts = [...document.querySelectorAll('#bench-agents-checks input[type="checkbox"]:checked')]
+    .map((el) => Number(el.value))
+    .filter((n) => Number.isFinite(n) && n > 0);
+  const seedStart = Number($('bench-seed-start')?.value || 0);
+  const numSeeds = Number($('bench-seeds')?.value || 3);
+  const seeds = Array.from({ length: Math.max(1, numSeeds) }, (_, i) => seedStart + i);
+  const mappoMode = $('bench-mappo-mode')?.value || 'sampled';
+  const mappoSeedOffset = Number($('bench-mappo-seed-offset')?.value || 1000);
+
+  return {
+    scenarios: scenarios.length ? scenarios : ['random_obstacles'],
+    agentCounts: agentCounts.length ? agentCounts : [2, 4, 6],
+    seeds,
+    mappoMode,
+    mappoSeedOffset,
+  };
+}
+
+async function runBatchExperiment({ switchPage = false } = {}) {
   if (state.running) return;
-  const scenario = $('bench-scenario').value || 'random_obstacles';
-  const agentCounts = ($('bench-agents').value || '2,4,6').split(',').map((s) => Number(s.trim()));
-  const numSeeds = Number($('bench-seeds').value || 3);
-  const seeds = Array.from({ length: numSeeds }, (_, i) => i);
-  const mappoMode = $('bench-mappo-mode').value || 'sampled';
+  const {
+    scenarios,
+    agentCounts,
+    seeds,
+    mappoMode,
+    mappoSeedOffset,
+  } = getSelectedBatchConfig();
+
+  if (switchPage) {
+    navigateToPage('results');
+  }
 
   state.running = true;
   $('run-bench').disabled = true;
-  $('bench-status').textContent = `Running ${agentCounts.length * seeds.length * 3} trials on '${scenario}'…`;
+  if ($('results-rerun-batch')) $('results-rerun-batch').disabled = true;
+  const totalTrials = scenarios.length * agentCounts.length * seeds.length * 3;
+  $('bench-status').textContent = `Running ${totalTrials} trials across ${scenarios.length} scenario family(s)…`;
 
   try {
     if (state.backendAvailable) {
@@ -1300,11 +1552,13 @@ async function runBatchExperiment() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          scenario,
+          scenario: scenarios[0],
+          scenarios,
           agent_counts: agentCounts,
           seeds,
           time_limit: 2.5,
           mappo_mode: mappoMode,
+          mappo_seed_offset: mappoSeedOffset,
         }),
       });
       const data = await resp.json();
@@ -1312,51 +1566,60 @@ async function runBatchExperiment() {
       renderBatchResults(data);
     } else {
       const rows = [];
-      for (const n of agentCounts) {
-        for (const seed of seeds) {
-          let built;
-          try {
-            built = buildScenario(scenario, { agents: n, seed });
-          } catch (e) {
-            continue;
-          }
-          const payload = {
-            matrix: built.matrix,
-            agents: built.agents,
-            heuristic: 'manhattan',
-            time_limit: 2.5,
-            mappo_mode: mappoMode,
-            seed,
-          };
-          for (const algo of ALGORITHMS) {
-            const res = runAlgorithmLocally(algo, payload);
-            rows.push({
-              scenario,
-              n_agents: built.agents.length,
+      for (const scName of scenarios) {
+        for (const n of agentCounts) {
+          for (const seed of seeds) {
+            let built;
+            try {
+              const cappedN = scName === 'corner_swap' ? Math.min(n, 8) : n;
+              built = buildScenario(scName, { agents: cappedN, seed });
+            } catch (e) {
+              continue;
+            }
+            const evalSeed = seed + mappoSeedOffset;
+            const payload = {
+              matrix: built.matrix,
+              agents: built.agents,
+              heuristic: 'manhattan',
+              time_limit: 2.5,
+              mappo_mode: mappoMode,
               seed,
-              algorithm: algo,
-              solved: res.solved,
-              valid: res.valid,
-              sum_of_costs: res.sum_of_costs ?? res.sumOfCosts,
-              makespan: res.makespan,
-              expansions: res.expansions,
-              runtime: algo === 'mappo' ? (res.inference_time ?? res.runtime) : res.runtime,
-              timing_type: algo === 'mappo' ? 'policy_inference' : 'online_search',
-              status_reason: res.status_reason,
-            });
+              mappo_eval_seed: evalSeed,
+            };
+            for (const algo of ALGORITHMS) {
+              const res = runAlgorithmLocally(algo, payload);
+              rows.push({
+                scenario: scName,
+                n_agents: built.agents.length,
+                seed,
+                scenario_seed: seed,
+                mappo_eval_seed: algo === 'mappo' ? evalSeed : null,
+                algorithm: algo,
+                solved: res.solved,
+                valid: res.valid,
+                sum_of_costs: res.sum_of_costs ?? res.sumOfCosts,
+                makespan: res.makespan,
+                expansions: res.expansions,
+                runtime: algo === 'mappo' ? (res.inference_time ?? res.runtime) : res.runtime,
+                timing_type: algo === 'mappo' ? 'policy_inference' : 'online_search',
+                status_reason: res.status_reason,
+              });
+            }
+            await new Promise((r) => setTimeout(r, 0));
           }
-          await new Promise((r) => setTimeout(r, 0));
         }
       }
       const summary = summarizeLocalBatch(rows);
-      const csvHeader = 'scenario,n_agents,seed,algorithm,solved,valid,sum_of_costs,makespan,expansions,runtime,timing_type,status_reason';
+      const csvHeader = 'scenario,n_agents,seed,scenario_seed,mappo_eval_seed,algorithm,solved,valid,sum_of_costs,makespan,expansions,runtime,timing_type,status_reason';
       const csvLines = rows.map((r) => [
-        r.scenario, r.n_agents, r.seed, r.algorithm, r.solved, r.valid,
+        r.scenario, r.n_agents, r.seed, r.scenario_seed, r.mappo_eval_seed ?? '',
+        r.algorithm, r.solved, r.valid,
         r.sum_of_costs ?? '', r.makespan ?? '', r.expansions ?? '',
         (r.runtime ?? 0).toFixed(6), r.timing_type, `"${String(r.status_reason || '').replace(/"/g, '""')}"`,
       ].join(','));
       renderBatchResults({
-        scenario,
+        scenario: scenarios[0],
+        scenarios,
         agent_counts: agentCounts,
         seeds,
         rows,
@@ -1364,12 +1627,13 @@ async function runBatchExperiment() {
         csv: [csvHeader, ...csvLines].join('\n'),
       });
     }
-    $('bench-status').textContent = `Completed ${state.batchData.rows.length} algorithm evaluations across ${agentCounts.length * seeds.length} shared problem instances.`;
+    $('bench-status').textContent = `Completed ${state.batchData.rows.length} algorithm evaluations across ${scenarios.length} scenario family(s).`;
   } catch (err) {
     $('bench-status').textContent = `Batch experiment error: ${err.message || err}`;
   } finally {
     state.running = false;
     $('run-bench').disabled = false;
+    if ($('results-rerun-batch')) $('results-rerun-batch').disabled = false;
   }
 }
 
@@ -1379,7 +1643,8 @@ function downloadBatchCsv() {
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = `pymapf-batch-${state.batchData.scenario || 'experiment'}.csv`;
+  const tag = (state.batchData.scenarios || [state.batchData.scenario || 'experiment']).join('-');
+  a.download = `pymapf-batch-${tag}.csv`;
   document.body.appendChild(a);
   a.click();
   a.remove();
@@ -1408,6 +1673,8 @@ comparison = compare_all_algorithms({
     "agents": [{"name": a.name, "start": a.start, "goal": a.goal} for a in agents],
     "heuristic": "${state.heuristic}",
     "mappo_mode": "${state.mappoMode}",
+    "seed": ${state.seed},
+    "mappo_eval_seed": ${state.mappoEvalSeed},
 })
 for algo, metrics in comparison["algorithms"].items():
     print(algo, "solved=", metrics["solved"], "valid=", metrics["valid"], "cost=", metrics["sum_of_costs"])`;
@@ -1416,7 +1683,6 @@ for algo, metrics in comparison["algorithms"].items():
 /* ----------------------------------------------------- Initialization --- */
 
 async function detectBackendAndPolicy() {
-  // 1. Load pre-trained MAPPO policy JSON so browser rollouts work everywhere
   try {
     const policyResp = await fetch('assets/mappo-policy.json');
     if (policyResp.ok) {
@@ -1426,7 +1692,6 @@ async function detectBackendAndPolicy() {
     // Ignore if unavailable
   }
 
-  // 2. Check if the native Python research server (/api/health) is running
   try {
     const resp = await fetch('/api/health');
     if (resp.ok) {
@@ -1434,7 +1699,7 @@ async function detectBackendAndPolicy() {
       if (info && info.ok) {
         state.backendAvailable = true;
         $('engine-glyph').className = 'status-glyph live';
-        $('engine-label').textContent = `Python ${info.python || ''} · pymapf ${info.version} (Prioritized A* · CBS · MAPPO)`;
+        $('engine-label').textContent = `Python ${info.python || ''} · pymapf ${info.version}`;
         return;
       }
     }
@@ -1444,13 +1709,34 @@ async function detectBackendAndPolicy() {
 
   state.backendAvailable = false;
   $('engine-glyph').className = 'status-glyph live';
-  $('engine-label').textContent = 'Browser Engine + Pre-trained MAPPO Checkpoint ready';
+  $('engine-label').textContent = 'Browser Engine + MAPPO Checkpoint';
 }
 
 function initControls() {
-  // Populate scenario selects
+  // Wire 3-page navigation buttons & links
+  document.querySelectorAll('[data-nav-page]').forEach((el) => {
+    el.addEventListener('click', (ev) => {
+      ev.preventDefault();
+      navigateToPage(el.dataset.navPage);
+    });
+  });
+
+  if ($('goto-sim-btn')) {
+    $('goto-sim-btn').addEventListener('click', () => navigateToPage('simulation'));
+  }
+  if ($('goto-results-btn')) {
+    $('goto-results-btn').addEventListener('click', () => navigateToPage('results'));
+  }
+
+  window.addEventListener('hashchange', () => {
+    if (window.location.hash) {
+      navigateToPage(window.location.hash, { updateHash: false });
+    }
+  });
+
+  // Populate scenario select & batch scenario multi-select checkboxes
   const scenarioSelect = $('scenario');
-  const benchScenarioSelect = $('bench-scenario');
+  const benchScenariosGroup = $('bench-scenarios-group');
   for (const [keyName, spec] of Object.entries(SCENARIOS)) {
     const opt1 = document.createElement('option');
     opt1.value = keyName;
@@ -1458,11 +1744,28 @@ function initControls() {
     if (keyName === state.scenario) opt1.selected = true;
     scenarioSelect.appendChild(opt1);
 
-    const opt2 = document.createElement('option');
-    opt2.value = keyName;
-    opt2.textContent = spec.label;
-    if (keyName === 'random_obstacles') opt2.selected = true;
-    benchScenarioSelect.appendChild(opt2);
+    if (benchScenariosGroup) {
+      const lbl = document.createElement('label');
+      lbl.className = 'check-pill';
+      const checked = keyName === 'empty_room' || keyName === 'random_obstacles';
+      lbl.innerHTML = `<input type="checkbox" value="${keyName}" ${checked ? 'checked' : ''}> ${spec.label}`;
+      benchScenariosGroup.appendChild(lbl);
+    }
+  }
+
+  if ($('bench-select-all-scenarios')) {
+    $('bench-select-all-scenarios').addEventListener('click', () => {
+      document.querySelectorAll('#bench-scenarios-group input[type="checkbox"]').forEach((cb) => {
+        cb.checked = true;
+      });
+    });
+  }
+  if ($('bench-select-default-scenarios')) {
+    $('bench-select-default-scenarios').addEventListener('click', () => {
+      document.querySelectorAll('#bench-scenarios-group input[type="checkbox"]').forEach((cb) => {
+        cb.checked = cb.value === 'empty_room' || cb.value === 'random_obstacles';
+      });
+    });
   }
 
   $('algorithm-blurb').textContent = ALGORITHM_BLURBS[state.algorithm];
@@ -1470,7 +1773,7 @@ function initControls() {
   scenarioSelect.addEventListener('change', () => {
     state.seed = 0;
     loadScenarioPreset(scenarioSelect.value);
-    runComparison();
+    runComparison(null, { switchPage: false });
   });
 
   $('agents').addEventListener('input', () => {
@@ -1479,7 +1782,7 @@ function initControls() {
   });
   $('agents').addEventListener('change', () => {
     loadScenarioPreset(state.scenario);
-    runComparison();
+    runComparison(null, { switchPage: false });
   });
 
   $('seed').addEventListener('input', () => {
@@ -1488,8 +1791,15 @@ function initControls() {
   });
   $('seed').addEventListener('change', () => {
     loadScenarioPreset(state.scenario);
-    runComparison();
+    runComparison(null, { switchPage: false });
   });
+
+  if ($('mappo-eval-seed')) {
+    $('mappo-eval-seed').addEventListener('change', () => {
+      state.mappoEvalSeed = Number($('mappo-eval-seed').value || 0);
+      syncRosterAndControls();
+    });
+  }
 
   $('grid-rows').addEventListener('input', () => {
     $('grid-rows-out').textContent = $('grid-rows').value;
@@ -1501,7 +1811,7 @@ function initControls() {
   $('regenerate').addEventListener('click', () => {
     state.seed = (state.seed + 1) % 41;
     loadScenarioPreset(state.scenario);
-    runComparison();
+    runComparison(null, { switchPage: false });
   });
   $('resize-apply').addEventListener('click', resizeEmptyGrid);
   $('clear-walls').addEventListener('click', clearInteriorObstacles);
@@ -1528,17 +1838,17 @@ function initControls() {
       document.querySelectorAll('#mappo-mode-group button').forEach((b) => {
         b.setAttribute('aria-pressed', String(b === btn));
       });
-      updateEquivalentCode();
+      syncRosterAndControls();
     });
   });
 
   $('train-mappo-btn').addEventListener('click', trainMappoOnActiveGrid);
-  $('run-compare').addEventListener('click', () => runComparison(null));
-  $('hero-run-compare').addEventListener('click', () => {
-    document.getElementById('comparison')?.scrollIntoView({ behavior: 'smooth' });
-    runComparison(null);
-  });
-  $('run-single').addEventListener('click', () => runComparison(state.algorithm));
+  $('run-compare').addEventListener('click', () => runComparison(null, { switchPage: true }));
+  $('hero-run-compare').addEventListener('click', () => runComparison(null, { switchPage: true }));
+  $('run-single').addEventListener('click', () => runComparison(state.algorithm, { switchPage: true }));
+  if ($('sim-rerun-compare')) {
+    $('sim-rerun-compare').addEventListener('click', () => runComparison(null, { switchPage: false }));
+  }
 
   // Editor tool buttons
   document.querySelectorAll('.tool-btn').forEach((btn) => {
@@ -1592,8 +1902,14 @@ function initControls() {
   });
 
   // Batch experiments
-  $('run-bench').addEventListener('click', runBatchExperiment);
+  $('run-bench').addEventListener('click', () => runBatchExperiment({ switchPage: true }));
+  if ($('results-rerun-batch')) {
+    $('results-rerun-batch').addEventListener('click', () => runBatchExperiment({ switchPage: false }));
+  }
   $('export-csv').addEventListener('click', downloadBatchCsv);
+  if ($('results-export-csv')) {
+    $('results-export-csv').addEventListener('click', downloadBatchCsv);
+  }
 
   // Theme toggle
   $('theme-toggle').addEventListener('click', () => {
@@ -1611,10 +1927,15 @@ function initControls() {
 async function boot() {
   initControls();
   wireBoardInteractions();
-  loadScenarioPreset('bottleneck');
+  loadScenarioPreset('corner_swap');
+  if (window.location.hash) {
+    navigateToPage(window.location.hash, { updateHash: false });
+  } else {
+    navigateToPage('setup', { updateHash: false });
+  }
   await detectBackendAndPolicy();
-  await runComparison(null);
-  runBatchExperiment();
+  await runComparison(null, { switchPage: false });
+  runBatchExperiment({ switchPage: false });
 }
 
 boot();

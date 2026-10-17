@@ -257,6 +257,10 @@ class MAPFEnv:
         self.goals = {
             agent: self._problem_goals[agent] for agent in self.possible_agents
         }
+        self.finished: Dict[str, bool] = {
+            agent: (not self.lifelong and self.positions[agent] == self.goals[agent])
+            for agent in self.possible_agents
+        }
 
     # ------------------------------------------------------------------
     # lifelong re-tasking
@@ -339,12 +343,22 @@ class MAPFEnv:
         self._episode += 1
         self.reward_function.reset(self)
         observations = self.encoder.encode_all(self)
-        infos = {agent: {} for agent in self.agents}
+        infos = {
+            agent: {
+                "at_goal": self.finished[agent],
+                "finished": self.finished[agent],
+                "distance_to_goal": self._manhattan(agent),
+            }
+            for agent in self.agents
+        }
         return observations, infos
 
     def step(self, actions: Dict[str, int]):
         """Advance one timestep. ``actions`` maps every live agent to an index."""
-        missing = set(self.agents) - set(actions)
+        active_unfinished = {
+            agent for agent in self.agents if not self.finished.get(agent, False)
+        }
+        missing = active_unfinished - set(actions)
         if missing:
             raise KeyError(
                 "step() needs an action for every agent; missing %s"
@@ -352,6 +366,10 @@ class MAPFEnv:
             )
 
         previous = dict(self.positions)
+        was_at_goal = {
+            agent: previous[agent] == self.goals[agent]
+            for agent in self.possible_agents
+        }
         resolved, blocked, collided = self._resolve(actions)
         self.positions = resolved
         self.step_count += 1
@@ -363,10 +381,11 @@ class MAPFEnv:
             agent: self.positions[agent] == self.goals[agent]
             for agent in self.possible_agents
         }
-        was_at_goal = {
-            agent: previous[agent] == self.goals[agent]
-            for agent in self.possible_agents
-        }
+        if not self.lifelong:
+            for agent in self.possible_agents:
+                if at_goal[agent]:
+                    self.finished[agent] = True
+
         solved = all(at_goal.values()) and not self.lifelong
         truncated = self.step_count >= self.max_steps and not solved
 
@@ -399,6 +418,7 @@ class MAPFEnv:
                 "blocked": blocked[agent],
                 "collided": collided[agent],
                 "at_goal": at_goal[agent],
+                "finished": self.finished[agent],
                 "distance_to_goal": self._manhattan(agent),
             }
             for agent in self.agents
@@ -417,10 +437,10 @@ class MAPFEnv:
     def _resolve(self, actions: Dict[str, int]):
         """Apply the joint action under MAPF's conflict rules.
 
-        Refusals cascade, so this iterates: an agent pushed back onto its own
-        cell can invalidate another agent that was moving into the cell it was
-        about to leave. Each round can only ever *add* refusals, and there are
-        finitely many agents, so the loop terminates.
+        In one-shot MAPF (``not self.lifelong``), an agent that has reached its
+        assigned goal is finished and remains stationary on its goal cell for the
+        remainder of the episode. Its occupied goal cell blocks other agents from
+        entering it.
         """
         intended: Dict[str, Cell] = {}
         blocked: Dict[str, bool] = {agent: False for agent in self.possible_agents}
@@ -434,6 +454,11 @@ class MAPFEnv:
                     "action %d out of range for %s (0..%d)"
                     % (action, agent, len(self.actions) - 1)
                 )
+            if not self.lifelong and (
+                self.finished.get(agent, False) or current == self.goals[agent]
+            ):
+                intended[agent] = current
+                continue
             delta = self.actions[action]
             target = (current[0] + delta[0], current[1] + delta[1])
             if delta == (0, 0):
@@ -548,13 +573,20 @@ class MAPFEnv:
 
     def episode_summary(self, solved: Optional[bool] = None) -> dict:
         if solved is None:
-            solved = all(
-                self.positions[agent] == self.goals[agent]
-                for agent in self.possible_agents
+            solved = (
+                all(
+                    self.positions[agent] == self.goals[agent]
+                    for agent in self.possible_agents
+                )
+                and not self.lifelong
             )
+        truncated = bool(
+            self.step_count >= self.max_steps and not solved and not self.lifelong
+        )
         solution = self.solution()
         summary = {
             "solved": bool(solved),
+            "truncated": truncated,
             "steps": self.step_count,
             "collisions": self._collisions,
             "sum_of_costs": solution.sum_of_costs if solved else None,
@@ -563,6 +595,11 @@ class MAPFEnv:
                 self.positions[agent] == self.goals[agent]
                 for agent in self.possible_agents
             ),
+            "finished_agents": [
+                agent
+                for agent in self.possible_agents
+                if self.finished.get(agent, False)
+            ],
         }
         if self.lifelong:
             steps = max(self.step_count, 1)

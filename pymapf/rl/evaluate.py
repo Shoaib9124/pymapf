@@ -107,6 +107,9 @@ def rollout(
     observations, _ = env.reset(seed=seed)
     while env.agents:
         actions = _ask(policy, observations, deterministic)
+        for agent in env.agents:
+            if getattr(env, "finished", {}).get(agent, False):
+                actions[agent] = 0
         observations, _, terminations, truncations, _ = env.step(actions)
         if any(terminations.values()) or any(truncations.values()):
             break
@@ -142,7 +145,7 @@ def plan(problem, algorithm: str, time_limit: float = 5.0):
         solution = solver.solve(problem)
     except PLANNER_FAILURES:
         return None
-    return solution if solution is not None and solution.is_valid() else None
+    return solution if solution is not None and solution.is_valid(problem) else None
 
 
 def _ask(policy, observations, deterministic):
@@ -179,7 +182,7 @@ def evaluate(
         started = time.perf_counter()
         solution, summary = rollout(env, policy, deterministic, seed=instance_seed)
         learned_runtime = time.perf_counter() - started
-        learned_valid = solution.is_valid()
+        learned_valid = solution.is_valid(env.problem)
         learned_solved = bool(summary["solved"]) and learned_valid
         learned_cost = solution.sum_of_costs if learned_solved else None
 

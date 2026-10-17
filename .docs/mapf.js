@@ -206,7 +206,13 @@ export function findFirstConflict(paths) {
         if (same(aNow, bNow)) {
           return { kind: 'vertex', a: names[i], b: names[j], t, cellA: aNow, cellB: bNow };
         }
-        if (t > 0) {
+      }
+    }
+    if (t > 0) {
+      for (let i = 0; i < names.length; i += 1) {
+        for (let j = i + 1; j < names.length; j += 1) {
+          const pa = paths[names[i]]; const pb = paths[names[j]];
+          const aNow = cellAt(pa, t); const bNow = cellAt(pb, t);
           const aPrev = cellAt(pa, t - 1); const bPrev = cellAt(pb, t - 1);
           if (same(aNow, bPrev) && same(bNow, aPrev) && !same(aPrev, bPrev)) {
             return { kind: 'edge', a: names[i], b: names[j], t, cellA: aNow, cellB: bNow };
@@ -229,8 +235,7 @@ export function countConflicts(paths) {
         const aNow = cellAt(pa, t); const bNow = cellAt(pb, t);
         if (same(aNow, bNow)) {
           total += 1;
-        }
-        if (t > 0) {
+        } else if (t > 0) {
           const aPrev = cellAt(pa, t - 1); const bPrev = cellAt(pb, t - 1);
           if (same(aNow, bPrev) && same(bNow, aPrev) && !same(aPrev, bPrev)) {
             total += 1;
@@ -244,7 +249,7 @@ export function countConflicts(paths) {
 
 export function solutionMetrics(paths, algorithm, expansions, runtime, problem = null) {
   const lengths = Object.values(paths).map((p) => p.length - 1);
-  const validation = problem ? validateSolution(problem, paths) : null;
+  const validation = problem ? validateSolution({ ...problem, algorithm }, paths) : null;
   return {
     paths,
     algorithm,
@@ -301,6 +306,7 @@ export function validateProblemSpec(spec) {
 
 export function validateSolution(problem, paths) {
   const { grid, agents, allowDiagonals = false } = problem;
+  const algorithm = paths?.algorithm || problem?.algorithm || '';
   const starts = new Set(agents.map((a) => key(a.start[0], a.start[1])));
   const goals = new Set(agents.map((a) => key(a.goal[0], a.goal[1])));
   const distinctStarts = starts.size === agents.length;
@@ -373,6 +379,14 @@ export function validateSolution(problem, paths) {
       allReachedGoal = false;
       goalOccupancyValid = false;
       violations.push(`Agent ${agent.name} ends at (${path[path.length - 1]}) instead of goal (${agent.goal}).`);
+    }
+    if (!['prioritized', 'cbs', 'wcbs', 'space_time_astar'].includes(algorithm)) {
+      for (let t = 0; t < path.length - 1; t += 1) {
+        if (same(path[t], agent.goal) && !same(path[t + 1], agent.goal)) {
+          goalOccupancyValid = false;
+          violations.push(`Agent ${agent.name} moved away from assigned goal (${agent.goal}) between t=${t} and t=${t + 1}.`);
+        }
+      }
     }
   }
 
@@ -712,17 +726,31 @@ function selectAction(logits, deterministic, rng) {
   return probs.length - 1;
 }
 
-function resolveEnvStep(grid, agentNames, positions, actions) {
+const MAPF_ACTION_LABELS = ['STAY', 'UP', 'DOWN', 'LEFT', 'RIGHT'];
+
+function resolveEnvStep(grid, agentNames, positions, actions, goals = null, finished = null) {
   const intended = {};
+  const blocked = {};
   const collided = {};
   for (const name of agentNames) {
+    blocked[name] = false;
     collided[name] = false;
     const [r, c] = positions[name];
-    const [dr, dc] = MAPF_ENV_ACTIONS[actions[name] ?? 0];
+    const isFinished = (finished && finished[name]) || (goals && goals[name] && same([r, c], goals[name]));
+    if (isFinished) {
+      intended[name] = [r, c];
+      continue;
+    }
+    const [dr, dc] = MAPF_ENV_ACTIONS[actions[name] ?? 0] || [0, 0];
     const target = [r + dr, c + dc];
-    if (dr === 0 && dc === 0) intended[name] = [r, c];
-    else if (!isFree(grid, target[0], target[1])) intended[name] = [r, c];
-    else intended[name] = target;
+    if (dr === 0 && dc === 0) {
+      intended[name] = [r, c];
+    } else if (!isFree(grid, target[0], target[1])) {
+      intended[name] = [r, c];
+      blocked[name] = true;
+    } else {
+      intended[name] = target;
+    }
   }
 
   for (;;) {
@@ -760,7 +788,7 @@ function resolveEnvStep(grid, agentNames, positions, actions) {
     if (!changed) break;
   }
   const collisionCount = Object.values(collided).filter(Boolean).length;
-  return { resolved: intended, collisionCount };
+  return { resolved: intended, blocked, collided, collisionCount };
 }
 
 export function mappoRollout(problem, policyData, options = {}) {
@@ -773,6 +801,7 @@ export function mappoRollout(problem, policyData, options = {}) {
       solved: false,
       valid: false,
       sumOfCosts: null,
+      sum_of_costs: null,
       makespan: null,
       expansions: null,
       runtime: 0,
@@ -780,16 +809,22 @@ export function mappoRollout(problem, policyData, options = {}) {
       training_time: 0,
       status_reason: 'MAPPO policy checkpoint not loaded',
       paths: {},
+      execution_log: [{ step: 0, kind: 'failed', text: 'MAPPO policy checkpoint not loaded' }],
       validation: validateSolution(problem, {}),
     };
   }
 
   const actionMode = String(options.mappo_mode || options.mappoMode || 'sampled').toLowerCase();
   const deterministic = actionMode === 'greedy';
-  const baseSeed = Number(options.seed ?? 0);
-  const maxSteps = Number(options.maxSteps ?? (4 * (grid.height + grid.width)));
+  const scenarioSeed = Number(options.seed ?? 0);
+  const evalSeed = Number(options.mappo_eval_seed ?? options.mappoSeed ?? scenarioSeed);
+  const maxSteps = Number(options.maxSteps ?? options.max_steps ?? (4 * (grid.height + grid.width)));
   const radius = policyData.observation_kwargs?.radius ?? 4;
   const attempts = deterministic ? 1 : Number(options.rolloutAttempts ?? 1);
+  const trainingMeta = policyData.training_meta || {};
+  const trainingModeLabel = trainingMeta.mode || 'Pre-trained general MAPPO policy';
+  const trainingSteps = trainingMeta.training_steps ?? 0;
+  const trainingTimeSec = trainingMeta.training_time_sec ?? 0;
 
   const agentNames = agents.map((a) => a.name);
   const goals = Object.fromEntries(agents.map((a) => [a.name, a.goal]));
@@ -800,34 +835,124 @@ export function mappoRollout(problem, policyData, options = {}) {
   let bestCollisions = 0;
   let bestSteps = 0;
   let bestAtGoal = 0;
+  let bestLogs = [];
+  let bestFinishedList = [];
 
   for (let attempt = 0; attempt < attempts; attempt += 1) {
-    const rng = mulberry32(baseSeed + attempt * 997 + 17);
+    const attemptSeed = evalSeed + attempt * 997;
+    const rng = mulberry32(attemptSeed + 17);
     let positions = Object.fromEntries(agents.map((a) => [a.name, [...a.start]]));
+    const finished = Object.fromEntries(agents.map((a) => [a.name, same(a.start, a.goal)]));
     const trajectories = Object.fromEntries(agents.map((a) => [a.name, [[...a.start]]]));
     let collisions = 0;
     let solved = false;
     let steps = 0;
 
+    const logs = [
+      {
+        step: 0,
+        kind: 'init',
+        text: `[INIT] MAPPO rollout on ${grid.height}×${grid.width} grid (${agentNames.length} agents, mode=${actionMode}, scenario_seed=${scenarioSeed}, mappo_eval_seed=${attemptSeed}, horizon=${maxSteps} steps)`,
+      },
+      {
+        step: 0,
+        kind: 'policy',
+        text: `[POLICY] ${trainingModeLabel} | ${Number(trainingSteps).toLocaleString()} training steps (offline training time=${Number(trainingTimeSec).toFixed(2)}s, 9×9 local window + goal bearing)`,
+      },
+    ];
+
+    for (const name of agentNames) {
+      if (finished[name]) {
+        logs.push({
+          step: 0,
+          kind: 'goal',
+          text: `[t=0] Agent ${name} starts on assigned goal (${goals[name]}) → marked FINISHED (stationary at goal)`,
+        });
+      }
+    }
+
     for (let step = 0; step < maxSteps; step += 1) {
-      if (agentNames.every((n) => same(positions[n], goals[n]))) {
+      if (agentNames.every((n) => finished[n])) {
         solved = true;
         break;
       }
+      const prevPositions = Object.fromEntries(agentNames.map((n) => [n, [...positions[n]]]));
+      const prevFinished = { ...finished };
       const actions = {};
       for (const name of agentNames) {
+        if (finished[name]) {
+          actions[name] = 0;
+          continue;
+        }
         const obs = encodeLocalObservation(grid, positions, goals, name, radius);
         const logits = mlpForward(obs, policyData.actor);
         actions[name] = selectAction(logits, deterministic, rng);
       }
-      const { resolved, collisionCount } = resolveEnvStep(grid, agentNames, positions, actions);
+      const { resolved, blocked, collided, collisionCount } = resolveEnvStep(
+        grid,
+        agentNames,
+        positions,
+        actions,
+        goals,
+        finished,
+      );
       positions = resolved;
       collisions += collisionCount;
       steps += 1;
+
+      const arrivedNow = [];
+      const blockedEvents = [];
+      const collisionEvents = [];
+      const moveSummaries = [];
+
       for (const name of agentNames) {
         trajectories[name].push([...positions[name]]);
+        if (same(positions[name], goals[name])) {
+          finished[name] = true;
+        }
+        const prevPos = prevPositions[name];
+        const currPos = positions[name];
+        const actIdx = actions[name] ?? 0;
+        const actLabel = prevFinished[name] ? 'LOCKED@GOAL' : (MAPF_ACTION_LABELS[actIdx] || String(actIdx));
+        moveSummaries.push(`${name}:${actLabel}(${prevPos})→(${currPos})`);
+
+        if (!prevFinished[name] && finished[name]) {
+          arrivedNow.push(`Agent ${name} reached goal (${currPos}) (FINISHED & locked)`);
+        }
+        if (blocked[name]) {
+          blockedEvents.push(`Agent ${name} ${actLabel} from (${prevPos}) blocked by obstacle/wall`);
+        }
+        if (collided[name]) {
+          const [dr, dc] = MAPF_ENV_ACTIONS[actIdx] || [0, 0];
+          const attempted = [prevPos[0] + dr, prevPos[1] + dc];
+          const parkedOwner = agentNames.find(
+            (other) => other !== name && prevFinished[other] && same(prevPositions[other], attempted),
+          );
+          if (parkedOwner) {
+            collisionEvents.push(
+              `Agent ${name} move (${prevPos})→(${attempted}) refused (occupied goal of finished Agent ${parkedOwner})`,
+            );
+          } else {
+            collisionEvents.push(`Agent ${name} move (${prevPos})→(${attempted}) refused (vertex/edge conflict)`);
+          }
+        }
       }
-      if (agentNames.every((n) => same(positions[n], goals[n]))) {
+
+      const allDone = agentNames.every((n) => finished[n]);
+      const notable = arrivedNow.length > 0 || blockedEvents.length > 0 || collisionEvents.length > 0;
+      if (steps <= 20 || notable || steps === maxSteps || allDone) {
+        const finCnt = agentNames.filter((n) => finished[n]).length;
+        logs.push({
+          step: steps,
+          kind: 'step',
+          text: `[t=${steps}] ${moveSummaries.join(', ')} | finished=${finCnt}/${agentNames.length}`,
+        });
+      }
+      for (const msg of arrivedNow) logs.push({ step: steps, kind: 'goal', text: `[t=${steps} GOAL] ${msg}` });
+      for (const msg of collisionEvents) logs.push({ step: steps, kind: 'conflict', text: `[t=${steps} REFUSED] ${msg}` });
+      for (const msg of blockedEvents) logs.push({ step: steps, kind: 'warn', text: `[t=${steps} BLOCKED] ${msg}` });
+
+      if (allDone) {
         solved = true;
         break;
       }
@@ -843,7 +968,26 @@ export function mappoRollout(problem, policyData, options = {}) {
     }
 
     const cost = Object.values(trimmed).reduce((acc, p) => acc + (p.length - 1), 0);
-    const atGoal = agentNames.filter((n) => same(positions[n], goals[n])).length;
+    const ms = Math.max(0, ...Object.values(trimmed).map((p) => p.length - 1));
+    const atGoal = agentNames.filter((n) => finished[n]).length;
+
+    if (solved) {
+      logs.push({
+        step: steps,
+        kind: 'solved',
+        text: `[TERMINATED: SOLVED] All ${agentNames.length}/${agentNames.length} agents reached and remained stationary at their goals at t=${steps} (sum_of_costs=${cost}, makespan=${ms}, refused_collisions=${collisions})`,
+      });
+    } else {
+      const unfinished = agentNames
+        .filter((n) => !finished[n])
+        .map((n) => `${n}@(${positions[n]})→goal(${goals[n]})`);
+      logs.push({
+        step: steps,
+        kind: 'failed',
+        text: `[TRUNCATED: UNSOLVED] Horizon expired at t=${steps}/${maxSteps}: ${atGoal}/${agentNames.length} agents finished; unfinished=[${unfinished.join(', ')}]; refused_collisions=${collisions}`,
+      });
+    }
+
     if (!bestPaths || (solved && (!bestSolved || cost < bestCost))) {
       bestPaths = trimmed;
       bestSolved = solved;
@@ -851,6 +995,8 @@ export function mappoRollout(problem, policyData, options = {}) {
       bestCollisions = collisions;
       bestSteps = steps;
       bestAtGoal = atGoal;
+      bestLogs = logs;
+      bestFinishedList = agentNames.filter((n) => finished[n]);
     }
     if (solved) break;
   }
@@ -858,32 +1004,37 @@ export function mappoRollout(problem, policyData, options = {}) {
   const inferenceTime = (performance.now() - started) / 1000;
   const validation = validateSolution(problem, bestPaths);
   const solvedAndValid = bestSolved && validation.valid;
-  const makespan = Math.max(0, ...Object.values(bestPaths).map((p) => p.length - 1));
-  const trainingMeta = policyData.training_meta || {};
+  const rolloutHorizon = Math.max(0, ...Object.values(bestPaths).map((p) => p.length - 1));
 
   return {
     algorithm: 'mappo',
     available: true,
     solved: solvedAndValid,
+    truncated: !solvedAndValid,
     valid: validation.valid,
     sumOfCosts: solvedAndValid ? bestCost : null,
     sum_of_costs: solvedAndValid ? bestCost : null,
-    makespan,
+    makespan: solvedAndValid ? rolloutHorizon : null,
+    rollout_horizon: rolloutHorizon,
     expansions: null,
     runtime: inferenceTime,
     inference_time: inferenceTime,
-    training_time: trainingMeta.training_time_sec ?? 0,
-    training_steps: trainingMeta.training_steps ?? 0,
-    training_mode: trainingMeta.mode || 'Pre-trained general MAPPO policy',
+    training_time: trainingTimeSec,
+    training_steps: trainingSteps,
+    training_mode: trainingModeLabel,
     mappo_mode: actionMode,
+    scenario_seed: scenarioSeed,
+    mappo_eval_seed: evalSeed,
     collisions_refused: bestCollisions,
     agents_at_goal: bestAtGoal,
+    finished_agents: bestFinishedList,
     steps_taken: bestSteps,
     max_steps: maxSteps,
     status_reason: solvedAndValid
       ? `Solved via ${actionMode} rollout (${bestCollisions} refused collision attempts)`
       : `Truncated at ${bestSteps}/${maxSteps} steps (${bestAtGoal}/${agentNames.length} agents at goal, ${bestCollisions} refused collision attempts)`,
     paths: bestPaths,
+    execution_log: bestLogs,
     validation,
   };
 }
@@ -906,12 +1057,20 @@ export function solveGenerator(problem, algorithm, options = {}) {
   return conflictBasedSearch(problem, { ...options, weight: 1 });
 }
 
-/** Drain a solver generator synchronously (used by the benchmark tab). */
+/** Drain a solver generator synchronously and attach recorded trace events. */
 export function solve(problem, algorithm, options = {}) {
   const generator = solveGenerator(problem, algorithm, options);
+  const events = [];
   let step = generator.next();
-  while (!step.done) step = generator.next();
-  return step.value;
+  while (!step.done) {
+    if (step.value) events.push(step.value);
+    step = generator.next();
+  }
+  if (step.value && typeof step.value === 'object') {
+    step.value.traceEvents = events;
+    return step.value;
+  }
+  return null;
 }
 
 /* ---------------------------------------------------------- scenarios --- */

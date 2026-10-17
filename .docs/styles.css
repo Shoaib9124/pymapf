@@ -655,8 +655,8 @@ canvas#board {
   white-space: nowrap;
   color: var(--muted);
 }
-.status-label.good { color: var(--good); }
-.status-label.bad { color: var(--critical); }
+.status-label.good, .status-label.ok { color: var(--good); }
+.status-label.bad, .status-label.fail { color: var(--critical); }
 .status-label.warn { color: var(--warning); }
 
 .comp-canvas-container {
@@ -694,8 +694,8 @@ canvas#board {
   color: var(--ink);
   font-variant-numeric: tabular-nums;
 }
-.comp-mini-metrics .v.good { color: var(--good); }
-.comp-mini-metrics .v.bad { color: var(--critical); }
+.comp-mini-metrics .v.good, .comp-mini-metrics .v.cell-pass { color: var(--good); }
+.comp-mini-metrics .v.bad, .comp-mini-metrics .v.cell-fail { color: var(--critical); }
 
 .comp-note {
   margin: 0;
@@ -744,10 +744,20 @@ table.results th {
   top: 0;
 }
 
-table.results td.good { color: var(--good); font-weight: 600; }
-table.results td.fail, table.results td.bad { color: var(--critical); font-weight: 600; }
+table.results td.good, table.results td.cell-pass { color: var(--good); font-weight: 600; }
+table.results td.fail, table.results td.bad, table.results td.cell-fail { color: var(--critical); font-weight: 600; }
 table.results td.warn { color: var(--warning); }
 table.results td.muted-cell { color: var(--muted); text-align: center; padding: 18px; }
+table.results tr.active-row { background: var(--surface-2); }
+
+.agent-dot {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  margin-right: 6px;
+  vertical-align: middle;
+}
 
 .log-wrap {
   margin-top: 14px;
@@ -767,6 +777,232 @@ table.results td.muted-cell { color: var(--muted); text-align: center; padding: 
 .log .conflict { color: var(--critical); }
 .log .branch { color: var(--muted); }
 .log .solved { color: var(--good); font-weight: 600; }
+
+/* ------------------------------------ 3-page layout & algorithm logs --- */
+
+.page-tabs {
+  gap: 8px;
+}
+
+.nav-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--ink-2);
+  padding: 6px 12px;
+  border-radius: 6px;
+  font-family: var(--sans);
+  font-size: 13.5px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background-color 120ms ease, color 120ms ease, border-color 120ms ease;
+}
+
+.nav-tab:hover {
+  color: var(--ink);
+  background: var(--surface-2);
+}
+
+.nav-tab.active {
+  color: var(--ink);
+  background: var(--surface-2);
+  border-color: var(--s1);
+}
+
+.nav-tab .step-num {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--s1);
+  font-weight: 700;
+}
+
+.compact-engine {
+  margin-right: 12px;
+  max-width: 280px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (max-width: 960px) {
+  .compact-engine { display: none; }
+}
+
+.page-view[hidden] {
+  display: none !important;
+}
+
+.page-view {
+  padding: 24px 0 36px;
+}
+
+.page-banner {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+  flex-wrap: wrap;
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 20px 22px;
+  margin-bottom: 24px;
+}
+
+.page-banner h1 {
+  margin: 0 0 8px;
+  font-size: clamp(22px, 2.5vw, 28px);
+  line-height: 1.2;
+  letter-spacing: -0.02em;
+}
+
+.page-banner p.lede {
+  margin: 0;
+  font-size: 14px;
+  color: var(--ink-2);
+  max-width: 74ch;
+}
+
+.banner-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  flex-shrink: 0;
+}
+
+.section-head-row {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  width: 100%;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.number-input {
+  width: 100%;
+  background: var(--surface-2);
+  color: var(--ink);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 7px 10px;
+  font-family: var(--mono);
+  font-size: 13px;
+}
+
+.batch-config-grid {
+  display: grid;
+  grid-template-columns: 1.25fr 1fr 1.1fr;
+  gap: 18px;
+  align-items: start;
+}
+
+@media (max-width: 1024px) {
+  .batch-config-grid { grid-template-columns: 1fr; }
+}
+
+.checkbox-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.checkbox-grid.compact-checks {
+  grid-template-columns: repeat(3, 1fr);
+}
+
+.check-pill {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 6px 9px;
+  font-size: 12.5px;
+  color: var(--ink);
+  cursor: pointer;
+  user-select: none;
+}
+
+.check-pill input[type="checkbox"] {
+  margin: 0;
+  accent-color: var(--s1);
+}
+
+.mini-btn-row {
+  display: flex;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.button.tiny-btn {
+  padding: 4px 9px;
+  font-size: 11.5px;
+}
+
+.algo-log-box {
+  margin-top: 6px;
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.algo-log-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.algo-log-head h4 {
+  margin: 0;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.log-count {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.algo-log {
+  background: var(--plane);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  line-height: 1.48;
+  height: 210px;
+  overflow-y: auto;
+  color: var(--ink-2);
+}
+
+.algo-log div {
+  padding: 2px 0;
+  border-bottom: 1px dashed rgba(128, 128, 128, 0.12);
+  word-break: break-word;
+}
+
+.algo-log div:last-child {
+  border-bottom: none;
+}
+
+.algo-log .init { color: var(--s1); font-weight: 600; }
+.algo-log .step { color: var(--ink-2); }
+.algo-log .branch { color: var(--muted); }
+.algo-log .conflict { color: var(--critical); font-weight: 600; }
+.algo-log .solved { color: var(--good); font-weight: 600; }
 
 /* ------------------------------------------------ batch experiments --- */
 
@@ -840,3 +1076,4 @@ footer .wrap {
   gap: 12px;
 }
 footer nav { display: flex; gap: 16px; }
+
