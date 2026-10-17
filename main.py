@@ -200,8 +200,11 @@ class ResearchPlatformHandler(SimpleHTTPRequestHandler):
             )
 
 
-# Aliases for backward compatibility in tests
-ResearchHTTPServer = ThreadingHTTPServer
+class ResearchHTTPServer(ThreadingHTTPServer):
+    allow_reuse_address = True
+    daemon_threads = True
+
+
 ResearchRequestHandler = ResearchPlatformHandler
 
 
@@ -259,9 +262,10 @@ def main() -> int:
     mimetypes.add_type("application/javascript", ".js")
     mimetypes.add_type("application/json", ".json")
 
-    server = ThreadingHTTPServer((args.host, args.port), ResearchPlatformHandler)
+    server = ResearchHTTPServer((args.host, args.port), ResearchPlatformHandler)
     print(
-        f"PyMAPF Research & Simulation Platform running at http://{args.host}:{args.port}"
+        f"PyMAPF Research & Simulation Platform running at http://{args.host}:{args.port}",
+        flush=True,
     )
     try:
         server.serve_forever()
