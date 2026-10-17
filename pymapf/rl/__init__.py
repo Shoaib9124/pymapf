@@ -1,25 +1,11 @@
-"""Reinforcement learning on the same MAPF instances the planners solve.
+"""Multi-agent reinforcement learning for 2D grid MAPF.
 
-The point of putting RL *inside* this library rather than beside it is that the
-hard part of a learned-MAPF paper is usually the part this repository already
-owns: correct instances, correct conflict semantics, and an optimal baseline to
-be measured against. A rollout here comes back as a
-:class:`pymapf.Solution` -- the same type CBS returns -- so "did the policy
-solve it" and "how far off optimal was it" are answered by the planner's own
-code::
-
-    from pymapf.rl import MAPFEnv, make_trainer, evaluate
-
-    env = MAPFEnv("random_obstacles", n_agents=4, width=10, height=10)
-    trainer = make_trainer("mappo", env)
-    trainer.learn(total_steps=200_000)
-    print(evaluate(env, trainer.policy, episodes=100, baseline="cbs"))
-
-Everything is a registry, matching the rest of the library: observations,
-rewards and algorithms are all chosen by name and extended from outside with a
-decorator, so adding a new encoding or a new learner does not mean editing this
-package.
+Provides the PettingZoo-compatible :class:`MAPFEnv`, centralized-critic
+:class:`MAPPO` (and :class:`IPPO`), local observation encoders, shaped/sparse
+reward functions, actor-critic networks, and rollout evaluation.
 """
+
+from __future__ import annotations
 
 from .algorithms import (
     IPPO,
@@ -31,18 +17,16 @@ from .algorithms import (
     make_trainer,
     register_algorithm,
 )
-from .env import DIAGONAL_ACTIONS, ORTHOGONAL_ACTIONS, MAPFEnv
-from .baselines import PIBTPolicy, RandomPolicy, ReplanPolicy
-from .evaluate import (
-    EvaluationResult,
-    LifelongResult,
-    compare,
-    compare_lifelong,
-    evaluate,
-    rollout,
+from .env import (
+    DIAGONAL_ACTIONS,
+    ORTHOGONAL_ACTIONS,
+    MAPFEnv,
 )
+from .evaluate import EvaluationResult, compare, evaluate, plan, rollout
 from .networks import (
+    MLP,
     ActorCritic,
+    Adam,
     NumpyActorCritic,
     TorchActorCritic,
     available_backends,
@@ -95,29 +79,26 @@ __all__ = [
     "PettingZooParallel",
     "SingleAgentGym",
     "VectorMAPFEnv",
-    # networks
+    # networks & trainers
     "ActorCritic",
     "NumpyActorCritic",
     "TorchActorCritic",
+    "MLP",
+    "Adam",
     "make_actor_critic",
     "available_backends",
-    # algorithms
     "PPOTrainer",
     "IPPO",
     "MAPPO",
     "RolloutBuffer",
     "compute_gae",
     "make_trainer",
-    "register_algorithm",
     "available_algorithms",
+    "register_algorithm",
     # evaluation
+    "EvaluationResult",
     "rollout",
+    "plan",
     "evaluate",
     "compare",
-    "compare_lifelong",
-    "LifelongResult",
-    "PIBTPolicy",
-    "ReplanPolicy",
-    "RandomPolicy",
-    "EvaluationResult",
 ]

@@ -209,6 +209,7 @@ class VectorMAPFEnv:
             if done:
                 final_info = {agent: dict(entry) for agent, entry in info.items()}
                 final_observation = observation
+                final_state = env.state()
                 truncated = any(truncation.values())
                 observation, reset_info = env.reset(
                     seed=int(self._random.integers(1 << 30))
@@ -222,6 +223,7 @@ class VectorMAPFEnv:
                         # real terminal state, biases every estimate near the
                         # horizon downward.
                         final_observation=final_observation.get(agent),
+                        final_state=final_state,
                         truncated=truncated,
                     )
                     for agent in env.agents

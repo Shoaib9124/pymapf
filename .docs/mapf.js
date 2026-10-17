@@ -206,9 +206,11 @@ export function findFirstConflict(paths) {
         if (same(aNow, bNow)) {
           return { kind: 'vertex', a: names[i], b: names[j], t, cellA: aNow, cellB: bNow };
         }
-        const aNext = cellAt(pa, t + 1); const bNext = cellAt(pb, t + 1);
-        if (same(aNow, bNext) && same(bNow, aNext)) {
-          return { kind: 'edge', a: names[i], b: names[j], t: t + 1, cellA: aNext, cellB: bNext };
+        if (t > 0) {
+          const aPrev = cellAt(pa, t - 1); const bPrev = cellAt(pb, t - 1);
+          if (same(aNow, bPrev) && same(bNow, aPrev) && !same(aPrev, bPrev)) {
+            return { kind: 'edge', a: names[i], b: names[j], t, cellA: aNow, cellB: bNow };
+          }
         }
       }
     }
@@ -225,8 +227,15 @@ export function countConflicts(paths) {
       for (let j = i + 1; j < names.length; j += 1) {
         const pa = paths[names[i]]; const pb = paths[names[j]];
         const aNow = cellAt(pa, t); const bNow = cellAt(pb, t);
-        if (same(aNow, bNow)) { total += 1; continue; }
-        if (same(aNow, cellAt(pb, t + 1)) && same(bNow, cellAt(pa, t + 1))) total += 1;
+        if (same(aNow, bNow)) {
+          total += 1;
+        }
+        if (t > 0) {
+          const aPrev = cellAt(pa, t - 1); const bPrev = cellAt(pb, t - 1);
+          if (same(aNow, bPrev) && same(bNow, aPrev) && !same(aPrev, bPrev)) {
+            total += 1;
+          }
+        }
       }
     }
   }
@@ -780,7 +789,7 @@ export function mappoRollout(problem, policyData, options = {}) {
   const baseSeed = Number(options.seed ?? 0);
   const maxSteps = Number(options.maxSteps ?? (4 * (grid.height + grid.width)));
   const radius = policyData.observation_kwargs?.radius ?? 4;
-  const attempts = deterministic ? 1 : Number(options.rolloutAttempts ?? 3);
+  const attempts = deterministic ? 1 : Number(options.rolloutAttempts ?? 1);
 
   const agentNames = agents.map((a) => a.name);
   const goals = Object.fromEntries(agents.map((a) => [a.name, a.goal]));

@@ -216,7 +216,7 @@ def run_once(
         sum_of_costs=solution.sum_of_costs if solution else None,
         makespan=solution.makespan if solution else None,
         expansions=solution.expansions if solution else 0,
-        valid=solution.is_valid() if solution else False,
+        valid=solution.is_valid(problem) if solution else False,
         note="" if solution else "no solution returned",
     )
 

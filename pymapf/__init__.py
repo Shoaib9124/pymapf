@@ -1,28 +1,15 @@
-"""PyMAPF: a toolbox for multi-agent path finding and planning.
+"""PyMAPF: a 2D Multi-Agent Pathfinding research and simulation library.
 
-The :mod:`pymapf.core` package defines the algorithm-agnostic framework
-(``GridMap``, ``MAPFProblem``, ``Solution``, ``MAPFSolver`` and a solver
-registry). Concrete centralized algorithms live in :mod:`pymapf.algorithms` and
-register themselves by name, so they can be obtained via :func:`get_solver`::
-
-    import pymapf
-
-    grid = pymapf.GridMap([[0, 0, 0], [0, 1, 0], [0, 0, 0]])
-    problem = pymapf.MAPFProblem(grid, [
-        pymapf.Agent("a", (0, 0), (2, 2)),
-        pymapf.Agent("b", (2, 0), (0, 2)),
-    ])
-    solution = pymapf.solve(problem, "cbs")
-    print(solution.paths, solution.sum_of_costs)
-
-The reactive/decentralized planners (NMPC, Velocity Obstacles) remain available
-under :mod:`pymapf.decentralized`.
+The :mod:`pymapf.core` package defines the shared 2D problem and validation
+framework (``GridMap``, ``MAPFProblem``, ``Solution``, ``ValidationReport``,
+``validate_solution``, and the solver registry). Concrete algorithms live in
+:mod:`pymapf.algorithms` (Prioritized Planning using Space-Time A* and
+Conflict-Based Search) and :mod:`pymapf.rl` (Multi-Agent PPO).
 """
 
 from .core import (
     Agent,
     Cell,
-    ExplicitGraph,
     Conflict,
     Constraints,
     GridMap,
@@ -33,7 +20,6 @@ from .core import (
     SearchTrace,
     Solution,
     ValidationReport,
-    VoxelGrid,
     available_solvers,
     find_first_conflict,
     get_solver,
@@ -44,18 +30,11 @@ from .core import (
 # Importing the algorithms package registers the built-in solvers by name.
 from . import algorithms  # noqa: F401  (side-effect: populates the registry)
 from . import scenarios  # noqa: F401
-from . import kinodynamic  # noqa: F401  (discrete plans -> trajectories)
-from . import aerial  # noqa: E402,F401
 from .algorithms import (
     ConflictBasedSearch,
-    LaCAM,
-    LargeNeighborhoodSearch,
-    PIBT,
     PrioritizedPlanning,
-    WeightedCBS,
     astar,
     dijkstra,
-    sipp,
     space_time_astar,
 )
 from .scenarios import Scenario, available_scenarios, build_scenario
@@ -73,7 +52,7 @@ def solve(
 
     ``observer`` receives :class:`SearchEvent` objects while the search runs
     (see :class:`SearchTrace`); ``kwargs`` are forwarded to the solver
-    constructor (e.g. ``heuristic``).
+    constructor (e.g. ``heuristic``, ``time_limit``, ``max_expansions``).
     """
     return get_solver(algorithm, **kwargs).solve(problem, observer=observer)
 
@@ -84,7 +63,6 @@ __all__ = [
     "Conflict",
     "Constraints",
     "GridMap",
-    "VoxelGrid",
     "MAPFProblem",
     "MAPFSolver",
     "Observer",
@@ -97,14 +75,8 @@ __all__ = [
     "build_scenario",
     "ConflictBasedSearch",
     "PrioritizedPlanning",
-    "WeightedCBS",
-    "PIBT",
-    "LaCAM",
-    "LargeNeighborhoodSearch",
-    "ExplicitGraph",
     "astar",
     "dijkstra",
-    "sipp",
     "space_time_astar",
     "available_solvers",
     "find_first_conflict",
@@ -112,6 +84,5 @@ __all__ = [
     "register_solver",
     "validate_solution",
     "solve",
-    "kinodynamic",
     "__version__",
 ]

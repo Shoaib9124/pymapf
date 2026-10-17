@@ -400,13 +400,14 @@ def find_first_conflict(paths: Dict[str, List[Cell]]) -> Optional[Conflict]:
                 a, b = names[i], names[j]
                 pa, pb = paths[a], paths[b]
                 a_now, b_now = _cell_at(pa, t), _cell_at(pb, t)
-                # Vertex conflict: both agents occupy the same cell.
+                # Vertex conflict: both agents occupy the same cell at t.
                 if a_now == b_now:
                     return Conflict("vertex", a, b, t, a_now, b_now)
-                # Edge conflict: agents swap cells between t and t+1.
-                a_next, b_next = _cell_at(pa, t + 1), _cell_at(pb, t + 1)
-                if a_now == b_next and b_now == a_next:
-                    return Conflict("edge", a, b, t + 1, a_next, b_next)
+                # Edge conflict: agents swap cells between t-1 and t.
+                if t > 0:
+                    a_prev, b_prev = _cell_at(pa, t - 1), _cell_at(pb, t - 1)
+                    if a_now == b_prev and b_now == a_prev and a_prev != b_prev:
+                        return Conflict("edge", a, b, t, a_now, b_now)
     return None
 
 
@@ -427,9 +428,10 @@ def count_conflicts(paths: Dict[str, List[Cell]]) -> int:
                 a_now, b_now = _cell_at(pa, t), _cell_at(pb, t)
                 if a_now == b_now:
                     total += 1
-                    continue
-                if a_now == _cell_at(pb, t + 1) and b_now == _cell_at(pa, t + 1):
-                    total += 1
+                if t > 0:
+                    a_prev, b_prev = _cell_at(pa, t - 1), _cell_at(pb, t - 1)
+                    if a_now == b_prev and b_now == a_prev and a_prev != b_prev:
+                        total += 1
     return total
 
 

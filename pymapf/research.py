@@ -346,10 +346,7 @@ def _run_mappo(
         training_steps = int(trainer.total_steps)
 
     # Measure inference/rollout time strictly separately from training time.
-    # When in sampled mode, if the first rollout truncates, we allow up to
-    # `rollout_attempts` seeded rollouts inside the evaluation budget and keep
-    # the best valid rollout (or the final trajectory for visualization).
-    rollout_attempts = 1 if deterministic else int(options.get("rollout_attempts", 5))
+    rollout_attempts = 1 if deterministic else int(options.get("rollout_attempts", 1))
     infer_started = time.perf_counter()
     best_solution: Optional[Solution] = None
     best_summary: Optional[dict] = None

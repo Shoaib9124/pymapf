@@ -227,6 +227,87 @@ class TestResearchPlatform(unittest.TestCase):
                             ),
                         )
 
+    def test_audit_cbs_and_prioritized_post_goal_and_conflict_edge_cases(self):
+        from pymapf.algorithms import ConflictBasedSearch, PrioritizedPlanning
+        from pymapf.core.solver import count_conflicts, find_first_conflict
+
+        # 1. Stationary vertex conflict across two steps is counted once per step,
+        # not double-counted as an edge-swap conflict.
+        stationary = {"A": [(1, 1), (1, 1)], "B": [(1, 1), (1, 1)]}
+        self.assertEqual(count_conflicts(stationary), 2)
+
+        # 2. Chronological conflict detection: vertex conflict at t=0 for (B, C)
+        # must be reported before an edge conflict at t=1 for (A, B).
+        paths_chrono = {
+            "A": [(1, 1), (1, 2)],
+            "B": [(1, 2), (1, 1)],
+            "C": [(1, 2), (1, 3)],
+        }
+        first = find_first_conflict(paths_chrono)
+        self.assertIsNotNone(first)
+        self.assertEqual(first.t, 0)
+        self.assertEqual(first.kind, "vertex")
+
+        # 3. Post-goal settling when a lower-priority agent starts on its goal
+        # while a higher-priority agent must pass through that cell:
+        # T-junction where B starts on its goal (1, 2) and must step into the
+        # alcove (2, 2) so A can cross from (1, 1) to (1, 3), then B returns to (1, 2).
+        grid = GridMap(
+            [
+                [1, 1, 1, 1, 1],
+                [1, 0, 0, 0, 1],
+                [1, 1, 0, 1, 1],
+                [1, 1, 1, 1, 1],
+            ]
+        )
+        prob = MAPFProblem(
+            grid,
+            [Agent("A", (1, 1), (1, 3)), Agent("B", (1, 2), (1, 2))],
+        )
+        sol_pp = PrioritizedPlanning().solve(prob)
+        self.assertIsNotNone(sol_pp)
+        self.assertTrue(sol_pp.is_valid(prob))
+
+        sol_cbs = ConflictBasedSearch().solve(prob)
+        self.assertIsNotNone(sol_cbs)
+        self.assertTrue(sol_cbs.is_valid(prob))
+        # A takes 2 steps ((1,1)->(1,2)->(1,3)); B steps into (2,2) at t=1 and
+        # returns to (1,2) at t=2 (cost 2) -> optimal sum_of_costs == 4.
+        self.assertEqual(sol_cbs.sum_of_costs, 4)
+
+    def test_audit_mappo_reproducibility_truncation_bootstrap_and_critic_warmstart(self):
+        from pymapf.rl import MAPFEnv, make_trainer, rollout
+        from pymapf.research import load_pretrained_mappo_state
+
+        scenario = empty_room(height=8, width=8, n_agents=3, seed=2)
+        env = MAPFEnv(
+            scenario.to_problem(),
+            observation="local",
+            reward="shaped",
+            observation_kwargs={"radius": 4, "include_goal_vector": True},
+            max_steps=6,
+            randomise=False,
+            seed=0,
+        )
+        trainer = make_trainer("mappo", env, n_envs=2, rollout_steps=8, seed=7)
+        pretrained = load_pretrained_mappo_state()
+        # Pre-trained checkpoint was trained with 4 agents (critic_dim=348);
+        # loading into a 3-agent trainer (critic_dim=343) must warm-start
+        # overlapping critic weights and all actor weights cleanly.
+        trainer.policy.load_state_dict(pretrained)
+
+        # Sampled rollout with identical seed must be 100% reproducible.
+        sol1, sum1 = rollout(env, trainer, deterministic=False, seed=123)
+        sol2, sum2 = rollout(env, trainer, deterministic=False, seed=123)
+        self.assertEqual(sol1.paths, sol2.paths)
+        self.assertEqual(sum1["steps"], sum2["steps"])
+
+        # Collect rollout across truncation boundary (max_steps=6) and verify
+        # PPOTrainer.collect runs without error and records episodes.
+        obs = trainer.vector.reset()
+        trainer.collect(obs)
+        self.assertTrue(trainer.buffer.full)
+
 
 if __name__ == "__main__":
     unittest.main()

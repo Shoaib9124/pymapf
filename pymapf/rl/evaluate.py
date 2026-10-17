@@ -99,6 +99,11 @@ def rollout(
     ``policy`` is anything with ``act(observations) -> {agent: action}``, which
     is what the trainers expose, so an untrained baseline is a two-line class.
     """
+    if seed is not None:
+        if hasattr(policy, "_random"):
+            policy._random = np.random.default_rng(seed)
+        if hasattr(policy, "policy") and hasattr(policy.policy, "_random"):
+            policy.policy._random = np.random.default_rng(seed)
     observations, _ = env.reset(seed=seed)
     while env.agents:
         actions = _ask(policy, observations, deterministic)

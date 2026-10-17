@@ -45,16 +45,6 @@ class GridMap:
             (r, c) for r, row in enumerate(rows) for c, value in enumerate(row) if value
         )
 
-    @classmethod
-    def from_world(cls, world) -> "GridMap":
-        """Build a :class:`GridMap` from a legacy ``World`` (walls are cells
-        whose grid value equals ``1``)."""
-        grid = [
-            [1 if world.grid[r][c] == 1 else 0 for c in range(world.length)]
-            for r in range(world.height)
-        ]
-        return cls(grid)
-
     def in_bounds(self, cell: Cell) -> bool:
         r, c = cell
         return 0 <= r < self.height and 0 <= c < self.width

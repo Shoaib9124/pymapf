@@ -98,7 +98,7 @@ def run_setting(family, kwargs, args):
         env,
         policies,
         episodes=args.episodes,
-        baselines=("cbs", "pibt"),
+        baselines=("cbs", "prioritized"),
         baseline_time_limit=args.time_limit,
         seed=args.eval_seed,
     )

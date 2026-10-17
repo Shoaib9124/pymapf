@@ -5,7 +5,6 @@ sys.path.append(path.dirname(path.dirname(path.abspath(__file__))))
 
 import pytest
 
-from pymapf.centralized.world import World
 from pymapf.core.grid import GridMap
 
 
@@ -49,9 +48,8 @@ def test_invalid_grid():
         GridMap([[0, 0], [0]])  # ragged
 
 
-def test_from_world():
-    w = World(6, 5, 0)  # no random walls, only the border
-    g = GridMap.from_world(w)
-    assert g.height == w.height and g.width == w.length
-    assert not g.is_free((0, 0))  # border is a wall
-    assert g.is_free((2, 2))  # interior is free
+def test_to_matrix_round_trip():
+    matrix = [[1, 1, 1], [1, 0, 1], [1, 1, 1]]
+    g = GridMap(matrix)
+    assert g.to_matrix() == matrix
+    assert g.as_matrix() == matrix

@@ -285,6 +285,24 @@ class PPOTrainer:
                 ],
                 dtype=np.float32,
             )
+            # Bootstrap value at truncation boundaries before auto-reset so
+            # truncated rollouts are not biased toward a zero terminal value.
+            for e in range(self.vector.num_envs):
+                for offset, agent in enumerate(self.agents):
+                    if truncations[e].get(agent, False) and not terminations[e].get(
+                        agent, False
+                    ):
+                        entry = infos[e].get(agent, {})
+                        final_obs = entry.get("final_observation")
+                        if final_obs is not None:
+                            if self.centralized_critic and "final_state" in entry:
+                                final_in = entry["final_state"]
+                            else:
+                                final_in = final_obs
+                            bootstrap_val = float(self.policy.value(final_in)[0])
+                            flat_rewards[e * len(self.agents) + offset] += (
+                                self.gamma * bootstrap_val
+                            )
             flat_dones = np.array(
                 [
                     float(
