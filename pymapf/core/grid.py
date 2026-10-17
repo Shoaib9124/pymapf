@@ -90,6 +90,15 @@ class GridMap:
                     result.append(n)
         return result
 
+    def to_matrix(self) -> List[List[int]]:
+        """Return a ``height x width`` 0/1 obstacle matrix."""
+        return [
+            [1 if (r, c) in self._blocked else 0 for c in range(self.width)]
+            for r in range(self.height)
+        ]
+
+    as_matrix = to_matrix
+
     def __repr__(self) -> str:
         return "GridMap(height=%d, width=%d, obstacles=%d)" % (
             self.height,

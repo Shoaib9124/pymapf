@@ -66,7 +66,7 @@ import pymapf
   await pyodide.runPythonAsync(`
 import json, time
 import pymapf
-from pymapf.core import Agent, GridMap, MAPFProblem
+from pymapf.core import Agent, GridMap, MAPFProblem, validate_solution
 from pymapf.benchmark import _supported
 
 
@@ -119,13 +119,22 @@ def run_solver(spec_json, sink):
     solution = pymapf.solve(problem, algorithm, observer=observer, **options)
     elapsed = time.perf_counter() - started
     if solution is None:
-        return json.dumps({"solved": False, "runtime": elapsed, "events": observer.count})
+        report = validate_solution(problem, None)
+        return json.dumps({
+            "solved": False,
+            "valid": False,
+            "runtime": elapsed,
+            "events": observer.count,
+            "validation": report.as_dict(),
+        })
+    report = validate_solution(problem, solution)
     data = solution.as_dict()
     data.update({
-        "solved": True,
-        "valid": solution.is_valid(),
+        "solved": report.valid,
+        "valid": report.valid,
         "runtime": elapsed,
         "events": observer.count,
+        "validation": report.as_dict(),
     })
     return json.dumps(data)
 
@@ -142,7 +151,7 @@ def run_benchmark(spec_json, progress):
     scaling_study(
         spec.get("scenario", "random_obstacles"),
         agent_counts=spec.get("agent_counts", [2, 4, 6, 8]),
-        algorithms=spec.get("algorithms", ["cbs", "wcbs", "prioritized"]),
+        algorithms=spec.get("algorithms", ["cbs", "prioritized"]),
         seeds=spec.get("seeds", [0, 1, 2]),
         solver_kwargs=spec.get("solver_kwargs") or {},
         on_result=_on_result,

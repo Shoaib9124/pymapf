@@ -16,3 +16,4 @@ matplotlib==3.10.7; python_version < "3.11"
 matplotlib==3.11.1; python_version >= "3.11"
 coloredlogs==15.0.1
 termcolor==3.3.0
+pytest>=7.0.0

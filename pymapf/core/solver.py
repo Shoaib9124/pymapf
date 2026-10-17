@@ -130,8 +130,14 @@ class Solution:
     def first_conflict(self) -> Optional[Conflict]:
         return find_first_conflict(self.paths)
 
-    def is_valid(self) -> bool:
+    def is_valid(self, problem: Optional[MAPFProblem] = None) -> bool:
+        if problem is not None:
+            return validate_solution(problem, self).valid
         return self.first_conflict() is None
+
+    def validate(self, problem: MAPFProblem) -> "ValidationReport":
+        """Validate this solution against ``problem``'s grid, starts, goals, and rules."""
+        return validate_solution(problem, self)
 
     def position_at(self, agent: str, t: int) -> Cell:
         """Where ``agent`` is at time ``t`` (it parks on its goal afterwards)."""
@@ -159,9 +165,225 @@ class Solution:
         }
 
 
+@dataclass(frozen=True)
+class ValidationReport:
+    """Detailed audit of a candidate :class:`Solution` against a :class:`MAPFProblem`."""
+
+    valid: bool
+    in_bounds_and_obstacle_free: bool
+    legal_moves: bool
+    vertex_conflict_free: bool
+    edge_swap_free: bool
+    all_reached_goal: bool
+    goal_occupancy_valid: bool
+    distinct_starts: bool
+    distinct_goals: bool
+    violations: List[str]
+    first_conflict: Optional[Conflict] = None
+
+    def as_dict(self) -> Dict:
+        return {
+            "valid": self.valid,
+            "in_bounds_and_obstacle_free": self.in_bounds_and_obstacle_free,
+            "legal_moves": self.legal_moves,
+            "vertex_conflict_free": self.vertex_conflict_free,
+            "edge_swap_free": self.edge_swap_free,
+            "all_reached_goal": self.all_reached_goal,
+            "goal_occupancy_valid": self.goal_occupancy_valid,
+            "distinct_starts": self.distinct_starts,
+            "distinct_goals": self.distinct_goals,
+            "violations": list(self.violations),
+            "first_conflict": (
+                {
+                    "kind": self.first_conflict.kind,
+                    "a": self.first_conflict.a,
+                    "b": self.first_conflict.b,
+                    "t": self.first_conflict.t,
+                    "cell_a": list(self.first_conflict.cell_a),
+                    "cell_b": list(self.first_conflict.cell_b),
+                }
+                if self.first_conflict is not None
+                else None
+            ),
+        }
+
+
 def _cell_at(path: List[Cell], t: int) -> Cell:
     """Position of an agent at time ``t`` (it waits on its goal after arrival)."""
     return path[t] if t < len(path) else path[-1]
+
+
+def validate_solution(
+    problem: MAPFProblem, solution: Optional[Solution]
+) -> ValidationReport:
+    """Audit ``solution`` against ``problem`` for movement, obstacle, conflict, and goal rules.
+
+    Checks:
+    1. Distinct starts and distinct goals across all agents.
+    2. Every trajectory cell is inside the grid and not an obstacle.
+    3. Every step ``t -> t+1`` is either a wait or a legal graph/grid neighbour step,
+       and ``path[0] == agent.start``.
+    4. No two agents occupy the same vertex at the same timestep ``t``.
+    5. No two agents swap vertices along the same edge between ``t`` and ``t+1``.
+    6. Every agent reaches its assigned goal at the end of its path.
+    7. Stay-at-goal occupancy semantics hold (agents remain on their goals after arrival
+       without colliding with still-moving agents).
+    """
+    starts = [a.start for a in problem.agents]
+    goals = [a.goal for a in problem.agents]
+    distinct_starts = len(set(starts)) == len(starts)
+    distinct_goals = len(set(goals)) == len(goals)
+    violations: List[str] = []
+
+    if not distinct_starts:
+        violations.append("Multiple agents share the same start cell.")
+    if not distinct_goals:
+        violations.append("Multiple agents share the same goal cell.")
+
+    if isinstance(solution, dict):
+        solution = Solution(paths=solution, algorithm="custom")
+
+    if solution is None or not solution.paths:
+        violations.append("No solution paths returned.")
+        return ValidationReport(
+            valid=False,
+            in_bounds_and_obstacle_free=False,
+            legal_moves=False,
+            vertex_conflict_free=False,
+            edge_swap_free=False,
+            all_reached_goal=False,
+            goal_occupancy_valid=False,
+            distinct_starts=distinct_starts,
+            distinct_goals=distinct_goals,
+            violations=violations,
+            first_conflict=None,
+        )
+
+    in_bounds_and_obstacle_free = True
+    legal_moves = True
+    vertex_conflict_free = True
+    edge_swap_free = True
+    all_reached_goal = True
+    goal_occupancy_valid = distinct_goals
+
+    grid = problem.grid
+    has_in_bounds = hasattr(grid, "in_bounds")
+
+    for agent in problem.agents:
+        path = solution.paths.get(agent.name)
+        if not path:
+            all_reached_goal = False
+            legal_moves = False
+            goal_occupancy_valid = False
+            violations.append("Agent %s has no path in solution." % agent.name)
+            continue
+
+        if tuple(path[0]) != tuple(agent.start):
+            legal_moves = False
+            violations.append(
+                "Agent %s starts at %s instead of assigned start %s."
+                % (agent.name, tuple(path[0]), tuple(agent.start))
+            )
+
+        for t, raw_cell in enumerate(path):
+            cell = tuple(raw_cell)
+            if has_in_bounds and not grid.in_bounds(cell):
+                in_bounds_and_obstacle_free = False
+                violations.append(
+                    "Agent %s moves outside the grid to %s at t=%d."
+                    % (agent.name, cell, t)
+                )
+            elif not grid.is_free(cell):
+                in_bounds_and_obstacle_free = False
+                violations.append(
+                    "Agent %s moves through obstacle at %s at t=%d."
+                    % (agent.name, cell, t)
+                )
+
+        for t in range(len(path) - 1):
+            curr = tuple(path[t])
+            nxt = tuple(path[t + 1])
+            if nxt == curr:
+                continue
+            valid_neighbors = (
+                grid.neighbors(curr, problem.allow_diagonals)
+                if (not has_in_bounds or grid.in_bounds(curr)) and grid.is_free(curr)
+                else []
+            )
+            if nxt not in valid_neighbors:
+                legal_moves = False
+                violations.append(
+                    "Agent %s makes illegal move %s -> %s between t=%d and t=%d."
+                    % (agent.name, curr, nxt, t, t + 1)
+                )
+
+        if tuple(path[-1]) != tuple(agent.goal):
+            all_reached_goal = False
+            goal_occupancy_valid = False
+            violations.append(
+                "Agent %s ends at %s instead of assigned goal %s."
+                % (agent.name, tuple(path[-1]), tuple(agent.goal))
+            )
+
+    names = [a.name for a in problem.agents if a.name in solution.paths]
+    normalized_paths: Dict[str, List[Cell]] = {
+        name: [tuple(c) for c in solution.paths[name]]
+        for name in names
+        if solution.paths[name]
+    }
+    active_names = list(normalized_paths)
+    horizon = max((len(p) for p in normalized_paths.values()), default=0)
+    first_conflict: Optional[Conflict] = None
+
+    for t in range(horizon):
+        for i in range(len(active_names)):
+            for j in range(i + 1, len(active_names)):
+                a, b = active_names[i], active_names[j]
+                pa, pb = normalized_paths[a], normalized_paths[b]
+                a_now, b_now = _cell_at(pa, t), _cell_at(pb, t)
+                if a_now == b_now:
+                    vertex_conflict_free = False
+                    if t >= len(pa) - 1 or t >= len(pb) - 1:
+                        goal_occupancy_valid = False
+                    if first_conflict is None:
+                        first_conflict = Conflict("vertex", a, b, t, a_now, b_now)
+                    violations.append(
+                        "Vertex conflict between %s and %s at cell %s (t=%d)."
+                        % (a, b, a_now, t)
+                    )
+                a_next, b_next = _cell_at(pa, t + 1), _cell_at(pb, t + 1)
+                if a_now == b_next and b_now == a_next and a_now != b_now:
+                    edge_swap_free = False
+                    if first_conflict is None:
+                        first_conflict = Conflict("edge", a, b, t + 1, a_next, b_next)
+                    violations.append(
+                        "Edge-swap conflict between %s and %s across %s <-> %s (t=%d)."
+                        % (a, b, a_now, b_now, t + 1)
+                    )
+
+    valid = (
+        distinct_starts
+        and distinct_goals
+        and in_bounds_and_obstacle_free
+        and legal_moves
+        and vertex_conflict_free
+        and edge_swap_free
+        and all_reached_goal
+        and goal_occupancy_valid
+    )
+    return ValidationReport(
+        valid=valid,
+        in_bounds_and_obstacle_free=in_bounds_and_obstacle_free,
+        legal_moves=legal_moves,
+        vertex_conflict_free=vertex_conflict_free,
+        edge_swap_free=edge_swap_free,
+        all_reached_goal=all_reached_goal,
+        goal_occupancy_valid=goal_occupancy_valid,
+        distinct_starts=distinct_starts,
+        distinct_goals=distinct_goals,
+        violations=violations,
+        first_conflict=first_conflict,
+    )
 
 
 def find_first_conflict(paths: Dict[str, List[Cell]]) -> Optional[Conflict]:

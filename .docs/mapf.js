@@ -233,8 +233,9 @@ export function countConflicts(paths) {
   return total;
 }
 
-export function solutionMetrics(paths, algorithm, expansions, runtime) {
+export function solutionMetrics(paths, algorithm, expansions, runtime, problem = null) {
   const lengths = Object.values(paths).map((p) => p.length - 1);
+  const validation = problem ? validateSolution(problem, paths) : null;
   return {
     paths,
     algorithm,
@@ -242,7 +243,182 @@ export function solutionMetrics(paths, algorithm, expansions, runtime) {
     runtime,
     makespan: Math.max(0, ...lengths),
     sumOfCosts: lengths.reduce((a, b) => a + b, 0),
-    valid: findFirstConflict(paths) === null,
+    valid: validation ? validation.valid : findFirstConflict(paths) === null,
+    validation,
+  };
+}
+
+export function validateProblemSpec(spec) {
+  const errors = [];
+  const { matrix, agents } = spec || {};
+  if (!Array.isArray(matrix) || !matrix.length || !Array.isArray(matrix[0])) {
+    return { ok: false, errors: ['Grid matrix must be a non-empty 2D array.'] };
+  }
+  const height = matrix.length;
+  const width = matrix[0].length;
+  if (!Array.isArray(agents) || !agents.length) {
+    return { ok: false, errors: ['At least one agent must be defined.'] };
+  }
+  const names = new Set();
+  const starts = new Map();
+  const goals = new Map();
+
+  for (const agent of agents) {
+    const name = String(agent.name);
+    if (names.has(name)) errors.push(`Duplicate agent name '${name}'.`);
+    names.add(name);
+    const [sr, sc] = agent.start || [];
+    const [gr, gc] = agent.goal || [];
+    if (sr < 0 || sr >= height || sc < 0 || sc >= width) {
+      errors.push(`Agent '${name}' start (${sr}, ${sc}) is outside the grid.`);
+    } else if (matrix[sr][sc]) {
+      errors.push(`Agent '${name}' start (${sr}, ${sc}) is on an obstacle.`);
+    }
+    if (gr < 0 || gr >= height || gc < 0 || gc >= width) {
+      errors.push(`Agent '${name}' goal (${gr}, ${gc}) is outside the grid.`);
+    } else if (matrix[gr][gc]) {
+      errors.push(`Agent '${name}' goal (${gr}, ${gc}) is on an obstacle.`);
+    }
+    const sk = key(sr, sc);
+    if (starts.has(sk)) errors.push(`Agents '${starts.get(sk)}' and '${name}' share start (${sr}, ${sc}).`);
+    else starts.set(sk, name);
+
+    const gk = key(gr, gc);
+    if (goals.has(gk)) errors.push(`Agents '${goals.get(gk)}' and '${name}' share goal (${gr}, ${gc}).`);
+    else goals.set(gk, name);
+  }
+  return { ok: errors.length === 0, errors };
+}
+
+export function validateSolution(problem, paths) {
+  const { grid, agents, allowDiagonals = false } = problem;
+  const starts = new Set(agents.map((a) => key(a.start[0], a.start[1])));
+  const goals = new Set(agents.map((a) => key(a.goal[0], a.goal[1])));
+  const distinctStarts = starts.size === agents.length;
+  const distinctGoals = goals.size === agents.length;
+  const violations = [];
+
+  if (!distinctStarts) violations.push('Multiple agents share the same start cell.');
+  if (!distinctGoals) violations.push('Multiple agents share the same goal cell.');
+
+  if (!paths || !Object.keys(paths).length) {
+    violations.push('No solution paths returned.');
+    return {
+      valid: false,
+      in_bounds_and_obstacle_free: false,
+      legal_moves: false,
+      vertex_conflict_free: false,
+      edge_swap_free: false,
+      all_reached_goal: false,
+      goal_occupancy_valid: false,
+      distinct_starts: distinctStarts,
+      distinct_goals: distinctGoals,
+      violations,
+      first_conflict: null,
+    };
+  }
+
+  let inBoundsAndObstacleFree = true;
+  let legalMoves = true;
+  let vertexConflictFree = true;
+  let edgeSwapFree = true;
+  let allReachedGoal = true;
+  let goalOccupancyValid = distinctGoals;
+
+  for (const agent of agents) {
+    const path = paths[agent.name];
+    if (!path || !path.length) {
+      allReachedGoal = false;
+      legalMoves = false;
+      goalOccupancyValid = false;
+      violations.push(`Agent ${agent.name} has no path in solution.`);
+      continue;
+    }
+    if (!same(path[0], agent.start)) {
+      legalMoves = false;
+      violations.push(`Agent ${agent.name} starts at (${path[0]}) instead of (${agent.start}).`);
+    }
+    for (let t = 0; t < path.length; t += 1) {
+      const [r, c] = path[t];
+      if (!inBounds(grid, r, c)) {
+        inBoundsAndObstacleFree = false;
+        violations.push(`Agent ${agent.name} moves outside the grid to (${r}, ${c}) at t=${t}.`);
+      } else if (!isFree(grid, r, c)) {
+        inBoundsAndObstacleFree = false;
+        violations.push(`Agent ${agent.name} moves through obstacle at (${r}, ${c}) at t=${t}.`);
+      }
+    }
+    for (let t = 0; t < path.length - 1; t += 1) {
+      const curr = path[t];
+      const nxt = path[t + 1];
+      if (same(curr, nxt)) continue;
+      const validNext = isFree(grid, curr[0], curr[1])
+        ? neighbors(grid, curr, allowDiagonals)
+        : [];
+      if (!validNext.some((n) => same(n, nxt))) {
+        legalMoves = false;
+        violations.push(`Agent ${agent.name} makes illegal move (${curr}) -> (${nxt}) at t=${t} -> ${t + 1}.`);
+      }
+    }
+    if (!same(path[path.length - 1], agent.goal)) {
+      allReachedGoal = false;
+      goalOccupancyValid = false;
+      violations.push(`Agent ${agent.name} ends at (${path[path.length - 1]}) instead of goal (${agent.goal}).`);
+    }
+  }
+
+  const activeNames = agents.map((a) => a.name).filter((n) => paths[n]?.length);
+  const horizon = Math.max(0, ...activeNames.map((n) => paths[n].length));
+  let firstConflict = null;
+
+  for (let t = 0; t < horizon; t += 1) {
+    for (let i = 0; i < activeNames.length; i += 1) {
+      for (let j = i + 1; j < activeNames.length; j += 1) {
+        const a = activeNames[i]; const b = activeNames[j];
+        const pa = paths[a]; const pb = paths[b];
+        const aNow = cellAt(pa, t); const bNow = cellAt(pb, t);
+        if (same(aNow, bNow)) {
+          vertexConflictFree = false;
+          if (t >= pa.length - 1 || t >= pb.length - 1) goalOccupancyValid = false;
+          if (!firstConflict) {
+            firstConflict = { kind: 'vertex', a, b, t, cell_a: aNow, cell_b: bNow };
+          }
+          violations.push(`Vertex conflict between ${a} and ${b} at (${aNow}) (t=${t}).`);
+        }
+        const aNext = cellAt(pa, t + 1); const bNext = cellAt(pb, t + 1);
+        if (same(aNow, bNext) && same(bNow, aNext) && !same(aNow, bNow)) {
+          edgeSwapFree = false;
+          if (!firstConflict) {
+            firstConflict = { kind: 'edge', a, b, t: t + 1, cell_a: aNext, cell_b: bNext };
+          }
+          violations.push(`Edge-swap conflict between ${a} and ${b} across (${aNow}) <-> (${bNow}) (t=${t + 1}).`);
+        }
+      }
+    }
+  }
+
+  const valid = (
+    distinctStarts
+    && distinctGoals
+    && inBoundsAndObstacleFree
+    && legalMoves
+    && vertexConflictFree
+    && edgeSwapFree
+    && allReachedGoal
+    && goalOccupancyValid
+  );
+  return {
+    valid,
+    in_bounds_and_obstacle_free: inBoundsAndObstacleFree,
+    legal_moves: legalMoves,
+    vertex_conflict_free: vertexConflictFree,
+    edge_swap_free: edgeSwapFree,
+    all_reached_goal: allReachedGoal,
+    goal_occupancy_valid: goalOccupancyValid,
+    distinct_starts: distinctStarts,
+    distinct_goals: distinctGoals,
+    violations,
+    first_conflict: firstConflict,
   };
 }
 
@@ -296,7 +472,7 @@ export function* prioritizedPlanning(problem, options = {}) {
     };
   }
 
-  const solution = solutionMetrics(reservations, 'prioritized', expansions, (performance.now() - started) / 1000);
+  const solution = solutionMetrics(reservations, 'prioritized', expansions, (performance.now() - started) / 1000, problem);
   yield { kind: 'solved', ...solution };
   return solution;
 }
@@ -340,8 +516,6 @@ export function* conflictBasedSearch(problem, options = {}) {
   yield { kind: 'root', agents: agents.map((a) => a.name), cost: root.cost };
 
   let tie = 0;
-  // OPEN orders by cost (the lower bound); FOCAL orders by conflict count and
-  // holds the nodes within weight × that bound.
   const open = new Heap((a, b) => (a[0] - b[0]) || (a[1] - b[1]));
   const pending = new Heap((a, b) => (a[0] - b[0]) || (a[1] - b[1]));
   const focal = new Heap((a, b) => (a[0] - b[0]) || (a[1] - b[1]) || (a[2] - b[2]));
@@ -387,7 +561,7 @@ export function* conflictBasedSearch(problem, options = {}) {
     const conflict = findFirstConflict(node.paths);
     if (!conflict) {
       const solution = solutionMetrics(node.paths, weight > 1 ? 'wcbs' : 'cbs',
-        expansions, (performance.now() - started) / 1000);
+        expansions, (performance.now() - started) / 1000, problem);
       yield { kind: 'solved', ...solution };
       return solution;
     }
@@ -437,8 +611,288 @@ export function* conflictBasedSearch(problem, options = {}) {
   return null;
 }
 
+/* ------------------------------------------- MAPPO rollout (exact port) --- */
+
+const MAPF_ENV_ACTIONS = [[0, 0], [-1, 0], [1, 0], [0, -1], [0, 1]];
+
+function encodeLocalObservation(grid, positions, goals, agentName, radius = 4) {
+  const [row, col] = positions[agentName];
+  const goal = goals[agentName];
+  const size = 2 * radius + 1;
+  const planeArea = size * size;
+  const flat = new Float32Array(4 * planeArea + 3);
+
+  const others = new Set();
+  const otherGoals = new Set();
+  for (const [name, pos] of Object.entries(positions)) {
+    if (name !== agentName) others.add(key(pos[0], pos[1]));
+  }
+  for (const [name, g] of Object.entries(goals)) {
+    if (name !== agentName) otherGoals.add(key(g[0], g[1]));
+  }
+
+  for (let dr = -radius; dr <= radius; dr += 1) {
+    for (let dc = -radius; dc <= radius; dc += 1) {
+      const cr = row + dr; const cc = col + dc;
+      const r = dr + radius; const c = dc + radius;
+      const idx = r * size + c;
+      if (!inBounds(grid, cr, cc) || !isFree(grid, cr, cc)) {
+        flat[idx] = 1.0;
+        continue;
+      }
+      const ck = key(cr, cc);
+      if (others.has(ck)) flat[planeArea + idx] = 1.0;
+      if (otherGoals.has(ck)) flat[2 * planeArea + idx] = 1.0;
+      if (cr === goal[0] && cc === goal[1]) flat[3 * planeArea + idx] = 1.0;
+    }
+  }
+
+  const deltaRow = goal[0] - row;
+  const deltaCol = goal[1] - col;
+  const dist = Math.hypot(deltaRow, deltaCol);
+  const diag = Math.hypot(grid.height, grid.width) || 1.0;
+  const base = 4 * planeArea;
+  if (dist > 1e-9) {
+    flat[base] = deltaRow / dist;
+    flat[base + 1] = deltaCol / dist;
+  }
+  flat[base + 2] = Math.min(1.0, dist / diag);
+  return flat;
+}
+
+function mlpForward(input, actorParams) {
+  let current = input;
+  const layers = actorParams.length / 2;
+  for (let l = 0; l < layers; l += 1) {
+    const W = actorParams[2 * l];
+    const b = actorParams[2 * l + 1];
+    const outDim = b.length;
+    const next = new Float64Array(outDim);
+    for (let j = 0; j < outDim; j += 1) {
+      let sum = b[j];
+      for (let i = 0; i < current.length; i += 1) {
+        sum += current[i] * W[i][j];
+      }
+      next[j] = l < layers - 1 ? Math.tanh(sum) : sum;
+    }
+    current = next;
+  }
+  return current;
+}
+
+function selectAction(logits, deterministic, rng) {
+  let maxLogit = -Infinity;
+  for (let i = 0; i < logits.length; i += 1) if (logits[i] > maxLogit) maxLogit = logits[i];
+  const probs = new Float64Array(logits.length);
+  let sumExp = 0;
+  for (let i = 0; i < logits.length; i += 1) {
+    probs[i] = Math.exp(logits[i] - maxLogit);
+    sumExp += probs[i];
+  }
+  if (deterministic) {
+    let best = 0;
+    for (let i = 1; i < probs.length; i += 1) if (probs[i] > probs[best]) best = i;
+    return best;
+  }
+  const draw = rng() * sumExp;
+  let cum = 0;
+  for (let i = 0; i < probs.length; i += 1) {
+    cum += probs[i];
+    if (draw <= cum) return i;
+  }
+  return probs.length - 1;
+}
+
+function resolveEnvStep(grid, agentNames, positions, actions) {
+  const intended = {};
+  const collided = {};
+  for (const name of agentNames) {
+    collided[name] = false;
+    const [r, c] = positions[name];
+    const [dr, dc] = MAPF_ENV_ACTIONS[actions[name] ?? 0];
+    const target = [r + dr, c + dc];
+    if (dr === 0 && dc === 0) intended[name] = [r, c];
+    else if (!isFree(grid, target[0], target[1])) intended[name] = [r, c];
+    else intended[name] = target;
+  }
+
+  for (;;) {
+    let changed = false;
+    const claims = new Map();
+    for (const name of agentNames) {
+      const ck = key(intended[name][0], intended[name][1]);
+      if (!claims.has(ck)) claims.set(ck, []);
+      claims.get(ck).push(name);
+    }
+    for (const claimants of claims.values()) {
+      if (claimants.length < 2) continue;
+      for (const name of claimants) {
+        if (!same(intended[name], positions[name])) {
+          intended[name] = [...positions[name]];
+          collided[name] = true;
+          changed = true;
+        }
+      }
+    }
+    for (let i = 0; i < agentNames.length; i += 1) {
+      for (let j = i + 1; j < agentNames.length; j += 1) {
+        const a = agentNames[i]; const b = agentNames[j];
+        if (same(intended[a], positions[b]) && same(intended[b], positions[a]) && !same(positions[a], positions[b])) {
+          for (const name of [a, b]) {
+            if (!same(intended[name], positions[name])) {
+              intended[name] = [...positions[name]];
+              collided[name] = true;
+              changed = true;
+            }
+          }
+        }
+      }
+    }
+    if (!changed) break;
+  }
+  const collisionCount = Object.values(collided).filter(Boolean).length;
+  return { resolved: intended, collisionCount };
+}
+
+export function mappoRollout(problem, policyData, options = {}) {
+  const started = performance.now();
+  const { grid, agents } = problem;
+  if (!policyData || !policyData.actor) {
+    return {
+      algorithm: 'mappo',
+      available: false,
+      solved: false,
+      valid: false,
+      sumOfCosts: null,
+      makespan: null,
+      expansions: null,
+      runtime: 0,
+      inference_time: 0,
+      training_time: 0,
+      status_reason: 'MAPPO policy checkpoint not loaded',
+      paths: {},
+      validation: validateSolution(problem, {}),
+    };
+  }
+
+  const actionMode = String(options.mappo_mode || options.mappoMode || 'sampled').toLowerCase();
+  const deterministic = actionMode === 'greedy';
+  const baseSeed = Number(options.seed ?? 0);
+  const maxSteps = Number(options.maxSteps ?? (4 * (grid.height + grid.width)));
+  const radius = policyData.observation_kwargs?.radius ?? 4;
+  const attempts = deterministic ? 1 : Number(options.rolloutAttempts ?? 3);
+
+  const agentNames = agents.map((a) => a.name);
+  const goals = Object.fromEntries(agents.map((a) => [a.name, a.goal]));
+
+  let bestPaths = null;
+  let bestSolved = false;
+  let bestCost = Infinity;
+  let bestCollisions = 0;
+  let bestSteps = 0;
+  let bestAtGoal = 0;
+
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    const rng = mulberry32(baseSeed + attempt * 997 + 17);
+    let positions = Object.fromEntries(agents.map((a) => [a.name, [...a.start]]));
+    const trajectories = Object.fromEntries(agents.map((a) => [a.name, [[...a.start]]]));
+    let collisions = 0;
+    let solved = false;
+    let steps = 0;
+
+    for (let step = 0; step < maxSteps; step += 1) {
+      if (agentNames.every((n) => same(positions[n], goals[n]))) {
+        solved = true;
+        break;
+      }
+      const actions = {};
+      for (const name of agentNames) {
+        const obs = encodeLocalObservation(grid, positions, goals, name, radius);
+        const logits = mlpForward(obs, policyData.actor);
+        actions[name] = selectAction(logits, deterministic, rng);
+      }
+      const { resolved, collisionCount } = resolveEnvStep(grid, agentNames, positions, actions);
+      positions = resolved;
+      collisions += collisionCount;
+      steps += 1;
+      for (const name of agentNames) {
+        trajectories[name].push([...positions[name]]);
+      }
+      if (agentNames.every((n) => same(positions[n], goals[n]))) {
+        solved = true;
+        break;
+      }
+    }
+
+    const trimmed = {};
+    for (const name of agentNames) {
+      const path = trajectories[name];
+      const g = goals[name];
+      let end = path.length;
+      while (end > 1 && same(path[end - 1], g) && same(path[end - 2], g)) end -= 1;
+      trimmed[name] = path.slice(0, end);
+    }
+
+    const cost = Object.values(trimmed).reduce((acc, p) => acc + (p.length - 1), 0);
+    const atGoal = agentNames.filter((n) => same(positions[n], goals[n])).length;
+    if (!bestPaths || (solved && (!bestSolved || cost < bestCost))) {
+      bestPaths = trimmed;
+      bestSolved = solved;
+      bestCost = cost;
+      bestCollisions = collisions;
+      bestSteps = steps;
+      bestAtGoal = atGoal;
+    }
+    if (solved) break;
+  }
+
+  const inferenceTime = (performance.now() - started) / 1000;
+  const validation = validateSolution(problem, bestPaths);
+  const solvedAndValid = bestSolved && validation.valid;
+  const makespan = Math.max(0, ...Object.values(bestPaths).map((p) => p.length - 1));
+  const trainingMeta = policyData.training_meta || {};
+
+  return {
+    algorithm: 'mappo',
+    available: true,
+    solved: solvedAndValid,
+    valid: validation.valid,
+    sumOfCosts: solvedAndValid ? bestCost : null,
+    sum_of_costs: solvedAndValid ? bestCost : null,
+    makespan,
+    expansions: null,
+    runtime: inferenceTime,
+    inference_time: inferenceTime,
+    training_time: trainingMeta.training_time_sec ?? 0,
+    training_steps: trainingMeta.training_steps ?? 0,
+    training_mode: trainingMeta.mode || 'Pre-trained general MAPPO policy',
+    mappo_mode: actionMode,
+    collisions_refused: bestCollisions,
+    agents_at_goal: bestAtGoal,
+    steps_taken: bestSteps,
+    max_steps: maxSteps,
+    status_reason: solvedAndValid
+      ? `Solved via ${actionMode} rollout (${bestCollisions} refused collision attempts)`
+      : `Truncated at ${bestSteps}/${maxSteps} steps (${bestAtGoal}/${agentNames.length} agents at goal, ${bestCollisions} refused collision attempts)`,
+    paths: bestPaths,
+    validation,
+  };
+}
+
+export function* mappoGenerator(problem, options = {}) {
+  yield { kind: 'root', agents: problem.agents.map((a) => a.name), cost: 0 };
+  const result = mappoRollout(problem, options.policyData, options);
+  if (result.solved) {
+    yield { kind: 'solved', ...result };
+    return result;
+  }
+  yield { kind: 'failed', reason: result.status_reason, result };
+  return result;
+}
+
 export function solveGenerator(problem, algorithm, options = {}) {
   if (algorithm === 'prioritized') return prioritizedPlanning(problem, options);
+  if (algorithm === 'mappo') return mappoGenerator(problem, options);
   if (algorithm === 'wcbs') return conflictBasedSearch(problem, { ...options, weight: options.weight ?? 1.5 });
   return conflictBasedSearch(problem, { ...options, weight: 1 });
 }

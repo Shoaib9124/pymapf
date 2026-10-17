@@ -323,9 +323,14 @@ class NumpyActorCritic(ActorCritic):
 
     def load_state_dict(self, state: dict) -> None:
         for param, saved in zip(self.actor.params, state["actor"]):
-            param[...] = saved
-        for param, saved in zip(self.critic.params, state["critic"]):
-            param[...] = saved
+            arr = np.asarray(saved, dtype=param.dtype)
+            if param.shape == arr.shape:
+                param[...] = arr
+        if "critic" in state:
+            for param, saved in zip(self.critic.params, state["critic"]):
+                arr = np.asarray(saved, dtype=param.dtype)
+                if param.shape == arr.shape:
+                    param[...] = arr
 
 
 def _clip_global_norm(grads: List[np.ndarray], max_norm: float) -> float:

@@ -1,18 +1,27 @@
 /**
- * app.js — the PyMAPF playground.
+ * app.js — PyMAPF 2D Multi-Agent Pathfinding Research & Simulation Platform.
  *
- * Responsibilities, in order of interest:
- *  1. draw the map, the live search and the plan playback on a canvas;
- *  2. drive two interchangeable solver engines (Pyodide worker / in-page JS);
- *  3. run user-written Python and surface whatever it produced;
- *  4. run a benchmark sweep and chart it as inline SVG.
- *
- * Colors come from the CSS custom properties, which mirror pymapf/viz/theme.py,
- * so the canvas, the charts and the matplotlib gallery agree.
+ * Drives:
+ *  1. Interactive 2D Grid & Multi-Agent Editor with strict invariant guards;
+ *  2. Side-by-side execution and synchronized timeline playback for
+ *     Prioritized Space-Time A*, Conflict-Based Search (CBS), and MAPPO;
+ *  3. Formal solution validation audit (6 criteria) and comparative metrics;
+ *  4. Batch experiment sweeps across scenarios/seeds with SVG charts & CSV export;
+ *  5. Native Python server API integration (/api/*) with automatic fallback to
+ *     the built-in browser engine + pre-trained MAPPO checkpoint when served statically.
  */
 
 import {
-  SCENARIOS, buildScenario, problemFromState, solveGenerator, gridFromMatrix, isFree,
+  SCENARIOS,
+  agentName,
+  buildScenario,
+  gridFromMatrix,
+  isFree,
+  mappoRollout,
+  problemFromState,
+  solve,
+  validateProblemSpec,
+  validateSolution,
 } from './mapf.js';
 
 /* ------------------------------------------------------------- helpers --- */
@@ -21,73 +30,93 @@ const $ = (id) => document.getElementById(id);
 const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 const SERIES = () => [1, 2, 3, 4, 5, 6, 7, 8].map((i) => css(`--s${i}`));
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
-const fmtMs = (seconds) => (seconds >= 1 ? `${seconds.toFixed(2)} s` : `${(seconds * 1000).toFixed(1)} ms`);
-
-const ALGORITHM_BLURBS = {
-  cbs: 'Provably optimal. Exponential in the number of conflicts — give it a budget.',
-  wcbs: 'Focal search: cost stays within w × optimal, usually far faster.',
-  lacam: 'Searches configurations with lazy constraints. Complete, and milliseconds fast.',
-  pibt: 'Plans one timestep at a time by priority inheritance. Scales, but incomplete.',
-  lns: 'Anytime: repeatedly re-plans small groups of agents and keeps improvements.',
-  prioritized: 'One agent at a time. Fastest, but can fail on solvable instances.',
+const fmtTime = (seconds) => {
+  if (seconds == null || Number.isNaN(seconds)) return '—';
+  if (seconds >= 1) return `${seconds.toFixed(2)} s`;
+  if (seconds >= 0.001) return `${(seconds * 1000).toFixed(1)} ms`;
+  return `${(seconds * 1e6).toFixed(0)} µs`;
 };
 
-// The JS preview engine implements CBS, weighted CBS and prioritized planning.
-// Anything else needs the real library, so selecting it forces the Python engine.
-const PYTHON_ONLY = new Set(['lacam', 'pibt', 'lns']);
+const ALGORITHMS = ['prioritized', 'cbs', 'mappo'];
+
+const ALGORITHM_LABELS = {
+  prioritized: 'Prioritized A*',
+  cbs: 'CBS (Optimal)',
+  mappo: 'MAPPO (RL)',
+};
+
+const ALGORITHM_BLURBS = {
+  prioritized: 'Sequential Space-Time A* with reservation table. Fast baseline, incomplete on tight bottlenecks.',
+  cbs: 'Bi-level Conflict-Based Search over constraint tree. Complete and provably sum-of-costs optimal.',
+  mappo: 'Centralized-critic Multi-Agent PPO policy using 9×9 local observations and goal vectors.',
+};
 
 /* --------------------------------------------------------------- state --- */
 
 const state = {
-  scenario: 'warehouse',
+  scenario: 'bottleneck',
   seed: 0,
-  agents: 6,
-  algorithm: 'wcbs',
-  weight: 1.5,
+  agents: 4,
+  algorithm: 'cbs',
   heuristic: 'manhattan',
-  engine: 'python',
+  timeLimit: 5.0,
+  mappoMode: 'sampled',
+  tool: 'wall',
+  activeAgentIndex: 0,
   matrix: [],
   agentList: [],
-  solution: null,
-  // live search view
-  searchPaths: null,
-  conflicts: [],
-  conflictCount: 0,
-  expansions: 0,
+  // Results per algorithm: { prioritized, cbs, mappo }
+  comparison: {
+    prioritized: null,
+    cbs: null,
+    mappo: null,
+  },
+  // Pre-trained or instance-trained MAPPO policy JSON
+  policyData: null,
+  backendAvailable: false,
   running: false,
-  // playback
+  // Synchronized playback state
   t: 0,
+  horizon: 0,
   playing: false,
+  speed: 3.2,
   lastFrame: 0,
+  // Batch experiment state
+  batchData: null,
 };
 
-/* ------------------------------------------------------------- drawing --- */
+/* ------------------------------------------------------------- logging --- */
 
-const canvas = $('board');
-const ctx = canvas.getContext('2d');
-
-function layout() {
-  const rows = state.matrix.length;
-  const cols = state.matrix[0]?.length || 1;
-  const dpr = window.devicePixelRatio || 1;
-  const maxWidth = canvas.parentElement.clientWidth - 24;
-  const cell = clamp(Math.floor(Math.min(maxWidth / cols, 560 / rows)), 8, 46);
-  const width = cell * cols;
-  const height = cell * rows;
-
-  canvas.style.width = `${width}px`;
-  canvas.style.height = `${height}px`;
-  canvas.width = Math.round(width * dpr);
-  canvas.height = Math.round(height * dpr);
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  return { cell, rows, cols, width, height };
+function clearLog() {
+  const el = $('log');
+  if (el) el.innerHTML = '';
 }
+
+function log(text, className = '') {
+  const el = $('log');
+  if (!el) return;
+  const line = document.createElement('div');
+  if (className) line.className = className;
+  line.textContent = text;
+  el.appendChild(line);
+  el.scrollTop = el.scrollHeight;
+}
+
+function setFeedback(text, kind = 'neutral') {
+  const box = $('editor-feedback');
+  if (!box) return;
+  box.textContent = text;
+  box.classList.remove('error', 'ok');
+  if (kind === 'error') box.classList.add('error');
+  if (kind === 'ok') box.classList.add('ok');
+}
+
+/* ----------------------------------------------------- canvas rendering --- */
 
 const ease = (f) => f * f * (3 - 2 * f);
 
 function positionAt(path, t) {
-  // Total in t: a clock jump (tab restore, a resize mid-capture) must never
-  // index outside the path.
+  if (!path || !path.length) return [0, 0];
   const last = path.length - 1;
   const clamped = Number.isFinite(t) ? Math.max(0, Math.min(t, last)) : 0;
   const whole = Math.floor(clamped);
@@ -97,8 +126,27 @@ function positionAt(path, t) {
   return [a[0] + (b[0] - a[0]) * k, a[1] + (b[1] - a[1]) * k];
 }
 
-function draw() {
-  const { cell, rows, cols, width, height } = layout();
+function fitCanvas(canvas, rows, cols, maxHeight = 460) {
+  const dpr = window.devicePixelRatio || 1;
+  const parentWidth = Math.max(220, (canvas.parentElement?.clientWidth || 360) - 20);
+  const cell = clamp(Math.floor(Math.min(parentWidth / cols, maxHeight / rows)), 10, 44);
+  const width = cell * cols;
+  const height = cell * rows;
+
+  canvas.style.width = `${width}px`;
+  canvas.style.height = `${height}px`;
+  canvas.width = Math.round(width * dpr);
+  canvas.height = Math.round(height * dpr);
+  const ctx = canvas.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  return { ctx, cell, rows, cols, width, height };
+}
+
+function drawGridAndAgents(canvas, paths, currentT, options = {}) {
+  if (!canvas || !state.matrix.length) return null;
+  const rows = state.matrix.length;
+  const cols = state.matrix[0]?.length || 1;
+  const { ctx, cell, width, height } = fitCanvas(canvas, rows, cols, options.maxHeight || 460);
   const colors = SERIES();
   const center = (v) => (v + 0.5) * cell;
 
@@ -106,55 +154,77 @@ function draw() {
   ctx.fillStyle = css('--surface-1');
   ctx.fillRect(0, 0, width, height);
 
-  // obstacles
+  // 1. Obstacles
   ctx.fillStyle = css('--obstacle');
   for (let r = 0; r < rows; r += 1) {
     for (let c = 0; c < cols; c += 1) {
-      if (state.matrix[r][c]) ctx.fillRect(c * cell, r * cell, cell, cell);
+      if (state.matrix[r][c]) {
+        ctx.fillRect(c * cell, r * cell, cell, cell);
+      }
     }
   }
 
-  // lattice
+  // 2. Grid lines
   ctx.strokeStyle = css('--grid');
   ctx.lineWidth = 1;
   ctx.beginPath();
-  for (let c = 0; c <= cols; c += 1) { ctx.moveTo(c * cell + 0.5, 0); ctx.lineTo(c * cell + 0.5, height); }
-  for (let r = 0; r <= rows; r += 1) { ctx.moveTo(0, r * cell + 0.5); ctx.lineTo(width, r * cell + 0.5); }
+  for (let c = 0; c <= cols; c += 1) {
+    ctx.moveTo(c * cell + 0.5, 0);
+    ctx.lineTo(c * cell + 0.5, height);
+  }
+  for (let r = 0; r <= rows; r += 1) {
+    ctx.moveTo(0, r * cell + 0.5);
+    ctx.lineTo(width, r * cell + 0.5);
+  }
   ctx.stroke();
 
-  const paths = state.solution?.paths || state.searchPaths;
-  const names = paths ? Object.keys(paths) : state.agentList.map((a) => a.name);
-  const colorOf = (name) => colors[names.indexOf(name) % colors.length];
+  const agentNames = state.agentList.map((a) => a.name);
+  const colorOf = (name) => {
+    const idx = agentNames.indexOf(name);
+    return colors[(idx >= 0 ? idx : 0) % colors.length];
+  };
 
-  // goal rings, always visible so intent is readable before a plan exists
+  // 3. Goal markers (open ring + subtle center dot)
   state.agentList.forEach((agent, index) => {
     const color = colors[index % colors.length];
+    const gx = center(agent.goal[1]);
+    const gy = center(agent.goal[0]);
     ctx.strokeStyle = color;
-    ctx.lineWidth = Math.max(1.6, cell * 0.09);
-    ctx.globalAlpha = 0.75;
+    ctx.lineWidth = Math.max(1.8, cell * 0.1);
+    ctx.globalAlpha = 0.85;
     ctx.beginPath();
-    ctx.arc(center(agent.goal[1]), center(agent.goal[0]), cell * 0.3, 0, Math.PI * 2);
+    ctx.arc(gx, gy, cell * 0.32, 0, Math.PI * 2);
     ctx.stroke();
+
+    if (cell >= 18) {
+      ctx.fillStyle = color;
+      ctx.globalAlpha = 0.85;
+      ctx.font = `600 ${Math.max(8, Math.round(cell * 0.25))}px ${css('--mono') || 'monospace'}`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(agent.name, gx, gy);
+    }
     ctx.globalAlpha = 1;
   });
 
-  if (paths) {
-    const railSpan = cell * 0.26;
-    names.forEach((name, index) => {
+  // 4. Planned trajectories / rails
+  const hasPaths = paths && Object.keys(paths).length > 0;
+  if (hasPaths) {
+    const railSpan = cell * 0.24;
+    agentNames.forEach((name, index) => {
       const path = paths[name];
-      if (!path?.length) return;
-      const offset = names.length > 1
-        ? (index / (names.length - 1) - 0.5) * railSpan
+      if (!path || !path.length) return;
+      const offset = agentNames.length > 1
+        ? (index / (agentNames.length - 1) - 0.5) * railSpan
         : 0;
       const color = colorOf(name);
 
-      // underlay in the surface color keeps crossing rails legible
-      for (const [stroke, lineWidth, alpha] of [
-        [css('--surface-1'), Math.max(3, cell * 0.22), 1],
-        [color, Math.max(1.8, cell * 0.11), state.solution ? 0.95 : 0.6],
+      for (const [stroke, lw, alpha] of [
+        [css('--surface-1'), Math.max(2.6, cell * 0.2), 0.9],
+        [color, Math.max(1.6, cell * 0.1), 0.9],
       ]) {
         ctx.strokeStyle = stroke;
-        ctx.lineWidth = lineWidth;
+        ctx.lineWidth = lw;
         ctx.globalAlpha = alpha;
         ctx.lineJoin = 'round';
         ctx.lineCap = 'round';
@@ -162,958 +232,1389 @@ function draw() {
         path.forEach(([r, c], i) => {
           const x = center(c) + offset;
           const y = center(r) + offset;
-          if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+          if (i === 0) ctx.moveTo(x, y);
+          else ctx.lineTo(x, y);
         });
         ctx.stroke();
         ctx.globalAlpha = 1;
       }
     });
-
-    // agents at the current timestep
-    if (state.solution) {
-      names.forEach((name) => {
-        const path = paths[name];
-        if (!path?.length) return;
-        const [r, c] = positionAt(path, state.t);
-        const color = colorOf(name);
-        const arrived = state.t >= path.length - 1;
-
-        ctx.beginPath();
-        ctx.arc(center(c), center(r), cell * 0.31, 0, Math.PI * 2);
-        ctx.fillStyle = color;
-        ctx.fill();
-        ctx.lineWidth = Math.max(1.5, cell * 0.07);
-        ctx.strokeStyle = css('--surface-1');
-        ctx.stroke();
-
-        if (arrived) {   // a subtle halo marks "done", not color alone
-          ctx.beginPath();
-          ctx.arc(center(c), center(r), cell * 0.44, 0, Math.PI * 2);
-          ctx.strokeStyle = color;
-          ctx.globalAlpha = 0.35;
-          ctx.stroke();
-          ctx.globalAlpha = 1;
-        }
-
-        if (cell >= 16) {
-          ctx.fillStyle = css('--surface-1');
-          ctx.font = `600 ${Math.round(cell * 0.36)}px ${css('--sans') || 'sans-serif'}`;
-          ctx.textAlign = 'center';
-          ctx.textBaseline = 'middle';
-          ctx.fillText(name, center(c), center(r) + 0.5);
-        }
-      });
-    }
   }
 
-  // conflicts found by the live search
-  ctx.strokeStyle = css('--critical');
-  ctx.lineWidth = Math.max(2, cell * 0.12);
-  ctx.lineCap = 'round';
-  for (const [r, c] of state.conflicts.slice(-4)) {
-    const x = center(c); const y = center(r); const s = cell * 0.24;
+  // 5. Agent discs (at currentT if paths exist, otherwise at start position)
+  state.agentList.forEach((agent, index) => {
+    const color = colors[index % colors.length];
+    const path = hasPaths ? paths[agent.name] : null;
+    const [r, c] = path && path.length ? positionAt(path, currentT) : agent.start;
+    const arrived = path && path.length
+      ? currentT >= path.length - 1
+        && path[path.length - 1][0] === agent.goal[0]
+        && path[path.length - 1][1] === agent.goal[1]
+      : (agent.start[0] === agent.goal[0] && agent.start[1] === agent.goal[1]);
+
+    const x = center(c);
+    const y = center(r);
+
+    // Highlight active agent in editor
+    if (options.highlightActive && index === state.activeAgentIndex) {
+      ctx.beginPath();
+      ctx.arc(x, y, cell * 0.44, 0, Math.PI * 2);
+      ctx.strokeStyle = css('--ink');
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([3, 2]);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+
     ctx.beginPath();
-    ctx.moveTo(x - s, y - s); ctx.lineTo(x + s, y + s);
-    ctx.moveTo(x + s, y - s); ctx.lineTo(x - s, y + s);
+    ctx.arc(x, y, cell * 0.31, 0, Math.PI * 2);
+    ctx.fillStyle = color;
+    ctx.fill();
+    ctx.lineWidth = Math.max(1.4, cell * 0.07);
+    ctx.strokeStyle = css('--surface-1');
+    ctx.stroke();
+
+    if (arrived) {
+      ctx.beginPath();
+      ctx.arc(x, y, cell * 0.42, 0, Math.PI * 2);
+      ctx.strokeStyle = color;
+      ctx.globalAlpha = 0.4;
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
+
+    if (cell >= 14) {
+      ctx.fillStyle = '#ffffff';
+      ctx.font = `700 ${Math.max(9, Math.round(cell * 0.34))}px ${css('--sans') || 'sans-serif'}`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(agent.name, x, y + 0.5);
+    }
+  });
+
+  // 6. Conflict marker if validation found a conflict
+  if (options.conflict && options.conflict.cell_a) {
+    const [cr, cc] = options.conflict.cell_a;
+    const x = center(cc);
+    const y = center(cr);
+    const s = cell * 0.28;
+    ctx.strokeStyle = css('--critical');
+    ctx.lineWidth = Math.max(2.2, cell * 0.12);
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(x - s, y - s);
+    ctx.lineTo(x + s, y + s);
+    ctx.moveTo(x + s, y - s);
+    ctx.lineTo(x - s, y + s);
     ctx.stroke();
   }
+
+  return { cell, rows, cols, width, height };
 }
 
-/* ------------------------------------------------------------ playback --- */
+function drawAllCanvases() {
+  // Master editor board shows the selected single algorithm's paths if present, or CBS/Prioritized
+  const primaryResult = state.comparison[state.algorithm]
+    || state.comparison.cbs
+    || state.comparison.prioritized
+    || state.comparison.mappo;
+  drawGridAndAgents(
+    $('board'),
+    primaryResult?.paths || null,
+    state.t,
+    {
+      maxHeight: 460,
+      highlightActive: true,
+      conflict: primaryResult?.validation?.first_conflict || null,
+    },
+  );
 
-function tick(now) {
+  // 3 Side-by-Side Comparison Canvases
+  for (const algo of ALGORITHMS) {
+    const res = state.comparison[algo];
+    drawGridAndAgents(
+      $(`canvas-${algo}`),
+      res?.paths || null,
+      state.t,
+      {
+        maxHeight: 290,
+        highlightActive: false,
+        conflict: res?.validation?.first_conflict || null,
+      },
+    );
+  }
+}
+
+/* ------------------------------------------------ UI & Roster Sync --- */
+
+function syncRosterAndControls() {
+  const rows = state.matrix.length;
+  const cols = state.matrix[0]?.length || 0;
+
+  $('grid-rows').value = String(rows);
+  $('grid-rows-out').textContent = String(rows);
+  $('grid-cols').value = String(cols);
+  $('grid-cols-out').textContent = String(cols);
+  $('agents').value = String(state.agentList.length);
+  $('agents-out').textContent = String(state.agentList.length);
+  $('seed').value = String(state.seed);
+  $('seed-out').textContent = String(state.seed);
+  $('grid-summary').textContent = `${rows}×${cols} · ${state.agentList.length} agents`;
+
+  if (state.activeAgentIndex >= state.agentList.length) {
+    state.activeAgentIndex = Math.max(0, state.agentList.length - 1);
+  }
+
+  // Active agent dropdown
+  const select = $('active-agent-select');
+  select.innerHTML = '';
+  state.agentList.forEach((agent, idx) => {
+    const opt = document.createElement('option');
+    opt.value = String(idx);
+    opt.textContent = `Agent ${agent.name} (${agent.start[0]},${agent.start[1]} → ${agent.goal[0]},${agent.goal[1]})`;
+    if (idx === state.activeAgentIndex) opt.selected = true;
+    select.appendChild(opt);
+  });
+
+  // Roster table
+  const colors = SERIES();
+  const tbody = $('agent-roster-body');
+  tbody.innerHTML = '';
+  state.agentList.forEach((agent, idx) => {
+    const tr = document.createElement('tr');
+    if (idx === state.activeAgentIndex) tr.classList.add('active-row');
+    const dist = Math.abs(agent.start[0] - agent.goal[0]) + Math.abs(agent.start[1] - agent.goal[1]);
+    const color = colors[idx % colors.length];
+    tr.innerHTML = `
+      <td><span class="agent-dot" style="background:${color}"></span><strong>${agent.name}</strong></td>
+      <td><code>(${agent.start[0]}, ${agent.start[1]})</code></td>
+      <td><code>(${agent.goal[0]}, ${agent.goal[1]})</code></td>
+      <td>${dist}</td>
+    `;
+    tr.addEventListener('click', () => {
+      state.activeAgentIndex = idx;
+      syncRosterAndControls();
+      drawAllCanvases();
+    });
+    tbody.appendChild(tr);
+  });
+
+  updateEquivalentCode();
+}
+
+function resetComparisonResults() {
+  state.playing = false;
+  state.t = 0;
+  state.horizon = 0;
+  state.comparison = { prioritized: null, cbs: null, mappo: null };
+
+  $('play').textContent = '⏵ Play';
+  $('play').disabled = true;
+  $('step-prev').disabled = true;
+  $('step-next').disabled = true;
+  $('step-reset').disabled = true;
+  $('timeline').disabled = true;
+  $('timeline').max = '0';
+  $('timeline').value = '0';
+  $('clock').textContent = 't = 0 / 0';
+
+  for (const algo of ALGORITHMS) {
+    const badge = $(`badge-${algo}`);
+    badge.textContent = 'Ready';
+    badge.className = 'status-label';
+    $(`mini-cost-${algo}`).textContent = '—';
+    $(`mini-ms-${algo}`).textContent = '—';
+    $(`mini-time-${algo}`).textContent = '—';
+    $(`mini-valid-${algo}`).textContent = '—';
+  }
+  drawAllCanvases();
+}
+
+/* ------------------------------------------- Synchronized Playback --- */
+
+function syncTransportToResults() {
+  const makespans = ALGORITHMS
+    .map((a) => state.comparison[a]?.makespan ?? 0)
+    .filter((m) => Number.isFinite(m) && m > 0);
+  const horizon = makespans.length ? Math.max(...makespans) : 0;
+  state.horizon = horizon;
+  state.t = 0;
+
+  const hasAnyPath = ALGORITHMS.some((a) => {
+    const paths = state.comparison[a]?.paths;
+    return paths && Object.keys(paths).length > 0;
+  });
+
+  $('timeline').max = String(horizon);
+  $('timeline').value = '0';
+  $('timeline').disabled = !hasAnyPath || horizon === 0;
+  $('play').disabled = !hasAnyPath || horizon === 0;
+  $('step-prev').disabled = !hasAnyPath || horizon === 0;
+  $('step-next').disabled = !hasAnyPath || horizon === 0;
+  $('step-reset').disabled = !hasAnyPath || horizon === 0;
+  $('clock').textContent = `t = 0 / ${horizon}`;
+}
+
+function setPlayhead(newT) {
+  state.t = clamp(newT, 0, state.horizon);
+  $('timeline').value = String(state.t);
+  $('clock').textContent = `t = ${Math.floor(state.t)} / ${state.horizon}`;
+  drawAllCanvases();
+}
+
+function tickPlayback(now) {
   if (!state.playing) return;
-  const horizon = state.solution ? state.solution.makespan : 0;
-  // Clamped so a backwards or very large frame delta cannot throw the playhead
-  // out of the plan.
   const dt = Math.min(0.1, Math.max(0, (now - state.lastFrame) / 1000));
   state.lastFrame = now;
-  state.t = Math.max(0, state.t + dt * 3.2);   // ~3 timesteps per second
-  if (state.t >= horizon) { state.t = horizon; state.playing = false; $('play').textContent = '⏵ Play'; }
-  $('timeline').value = String(Math.floor(state.t));
-  $('clock').textContent = `t = ${Math.floor(state.t)} / ${horizon}`;
-  draw();
-  if (state.playing) requestAnimationFrame(tick);
+  const nextT = state.t + dt * state.speed;
+  if (nextT >= state.horizon) {
+    setPlayhead(state.horizon);
+    state.playing = false;
+    $('play').textContent = '⏵ Play';
+    return;
+  }
+  setPlayhead(nextT);
+  requestAnimationFrame(tickPlayback);
 }
 
-function play() {
-  if (!state.solution) return;
-  if (state.t >= state.solution.makespan) state.t = 0;
+function togglePlay() {
+  if (state.horizon <= 0) return;
+  if (state.playing) {
+    state.playing = false;
+    $('play').textContent = '⏵ Play';
+    return;
+  }
+  if (state.t >= state.horizon) state.t = 0;
   state.playing = true;
   state.lastFrame = performance.now();
   $('play').textContent = '⏸ Pause';
-  requestAnimationFrame(tick);
+  requestAnimationFrame(tickPlayback);
 }
 
-/* ------------------------------------------------------------- logging --- */
+/* ----------------------------------- Metrics & Validation Table Updates --- */
 
-function log(text, className = '') {
-  const element = $('log');
-  const line = document.createElement('div');
-  if (className) line.className = className;
-  line.textContent = text;
-  element.appendChild(line);
-  element.scrollTop = element.scrollHeight;
-  while (element.childElementCount > 260) element.removeChild(element.firstChild);
-}
-
-function handleEvent(event) {
-  if (event.kind === 'expand') {
-    state.expansions += 1;
-    if (event.paths) state.searchPaths = event.paths;
-    if (state.expansions % 3 === 1 || event.node < 6) {
-      log(`node ${event.node}  cost ${event.cost}  open ${event.open}`);
-    }
-  } else if (event.kind === 'conflict') {
-    state.conflictCount += 1;
-    if (event.cell) state.conflicts.push(event.cell);
-    log(`✕ ${event.type} conflict: ${event.a} ↔ ${event.b} at t=${event.t}`, 'conflict');
-  } else if (event.kind === 'branch') {
-    if (state.conflictCount < 12) log(`  ↳ constrain ${event.agent} (cost ${event.cost})`, 'branch');
-  } else if (event.kind === 'agent_planned') {
-    log(`planned ${event.agent}: ${event.cost} steps`);
-    if (event.path) {
-      state.searchPaths = { ...(state.searchPaths || {}), [event.agent]: event.path };
-    }
-  } else if (event.kind === 'root') {
-    log(`root node: ${event.agents.join(', ')}`);
-  } else if (event.kind === 'failed') {
-    log(`failed — ${event.reason}`, 'conflict');
-  }
-}
-
-/* ------------------------------------------------------------- metrics --- */
-
-function showMetrics(solution, extra = {}) {
-  const set = (id, value, tone = '') => {
-    const element = $(id);
-    element.textContent = value;
-    element.className = `value ${tone}`;
-  };
-  if (!solution) {
-    ['m-cost', 'm-makespan', 'm-valid'].forEach((id) => set(id, '—'));
-    set('m-expansions', String(extra.expansions ?? state.expansions));
-    set('m-conflicts', String(extra.conflicts ?? state.conflictCount));
-    set('m-runtime', extra.runtime != null ? fmtMs(extra.runtime) : '—');
+function formatBoolCell(el, flag, passText = 'PASS', failText = 'FAIL') {
+  if (!el) return;
+  if (flag == null) {
+    el.textContent = '—';
+    el.className = '';
     return;
   }
-  set('m-cost', String(solution.sumOfCosts));
-  set('m-makespan', String(solution.makespan));
-  set('m-expansions', String(solution.expansions));
-  set('m-conflicts', String(state.conflictCount));
-  set('m-runtime', fmtMs(solution.runtime));
-  set('m-valid', solution.valid ? 'yes' : 'no', solution.valid ? 'good' : 'bad');
+  el.textContent = flag ? `✓ ${passText}` : `✕ ${failText}`;
+  el.className = flag ? 'cell-pass' : 'cell-fail';
 }
 
-/* -------------------------------------------------------------- engine --- */
+function updateComparisonUI() {
+  const cbsCost = state.comparison.cbs?.solved ? (state.comparison.cbs.sum_of_costs ?? state.comparison.cbs.sumOfCosts) : null;
 
-const engine = {
-  worker: null,
-  ready: false,
-  failed: false,
-  pendingSolve: null,
-  onEvent: handleEvent,
-};
-
-function setEngineBadge(status, label) {
-  $('engine-dot').className = `dot ${status}`;
-  $('engine-label').textContent = label;
-}
-
-function bootWorker() {
-  let worker;
-  try {
-    worker = new Worker('worker.js', { type: 'module' });
-  } catch (error) {
-    engine.failed = true;
-    setEngineBadge('error', 'JS engine (workers unavailable)');
-    selectEngine('js');
-    return;
-  }
-  engine.worker = worker;
-
-  worker.onmessage = ({ data }) => {
-    if (data.type === 'status') {
-      setEngineBadge('loading', `${data.detail}…`);
-    } else if (data.type === 'ready') {
-      engine.ready = true;
-      setEngineBadge('live', `pymapf ${data.version} · Python ${data.python} (WASM)`);
-      $('code-output').textContent =
-        `PyMAPF ${data.version} on Python ${data.python}\nSolvers: ${data.solvers.join(', ')}\n\nReady — hit “Run Python”.`;
-      if (engine.pendingSolve) { const spec = engine.pendingSolve; engine.pendingSolve = null; runPython(spec); }
-    } else if (data.type === 'event') {
-      engine.onEvent(data.event);
-      draw();
-    } else if (data.type === 'result') {
-      finishSolve(data.result && data.result.solved ? {
-        paths: data.result.paths,
-        sumOfCosts: data.result.sum_of_costs,
-        makespan: data.result.makespan,
-        expansions: data.result.expansions,
-        runtime: data.result.runtime,
-        valid: data.result.valid,
-        algorithm: data.result.algorithm,
-      } : null, data.result?.runtime);
-    } else if (data.type === 'bench-row') {
-      benchmarkRow(data.row);
-    } else if (data.type === 'bench-done') {
-      benchmarkDone(data.rows);
-    } else if (data.type === 'exec-done') {
-      showExecResult(data);
-    } else if (data.type === 'error') {
-      if (data.context === 'init') {
-        engine.failed = true;
-        setEngineBadge('error', 'JS engine (Python runtime unavailable)');
-        selectEngine('js');
-        $('code-output').textContent =
-          `The Python runtime could not be loaded:\n  ${data.message}\n\n` +
-          'The Visual and Benchmark tabs still work — they fall back to the ' +
-          'JavaScript port of the same solvers.';
-      } else {
-        log(`engine error: ${data.message}`, 'conflict');
-        state.running = false;
-        $('run').disabled = false;
-      }
+  for (const algo of ALGORITHMS) {
+    const res = state.comparison[algo];
+    const badge = $(`badge-${algo}`);
+    if (!res) {
+      badge.textContent = 'Not run';
+      badge.className = 'status-label';
+      continue;
     }
-  };
 
-  setEngineBadge('loading', 'loading Python runtime…');
-  worker.postMessage({ type: 'init' });
+    const cost = res.sum_of_costs ?? res.sumOfCosts;
+    const val = res.validation || {};
+    const timeSec = algo === 'mappo' ? (res.inference_time ?? res.runtime) : res.runtime;
+
+    if (res.solved && res.valid) {
+      badge.textContent = '✓ Solved & Valid';
+      badge.className = 'status-label ok';
+    } else if (!res.available && res.available !== undefined) {
+      badge.textContent = 'Unavailable';
+      badge.className = 'status-label warn';
+    } else {
+      badge.textContent = '✕ Unsolved / Incomplete';
+      badge.className = 'status-label fail';
+    }
+
+    // Mini panel summary
+    $(`mini-cost-${algo}`).textContent = cost != null ? String(cost) : '—';
+    $(`mini-ms-${algo}`).textContent = res.makespan != null ? String(res.makespan) : '—';
+    $(`mini-time-${algo}`).textContent = fmtTime(timeSec);
+    $(`mini-valid-${algo}`).textContent = res.valid ? '✓ Valid' : '✕ Invalid';
+    $(`mini-valid-${algo}`).className = `v ${res.valid ? 'cell-pass' : 'cell-fail'}`;
+    $(`note-${algo}`).textContent = res.status_reason || (res.solved ? 'All agents reached assigned goals without conflict.' : 'Failed to find a valid joint plan.');
+
+    // Main comparative performance table
+    formatBoolCell($(`tbl-solved-${algo}`), Boolean(res.solved), 'Solved', 'Unsolved');
+    formatBoolCell($(`tbl-valid-${algo}`), Boolean(res.valid), 'Valid', 'Invalid');
+    $(`tbl-cost-${algo}`).textContent = cost != null ? String(cost) : '—';
+
+    if (cost != null && cbsCost != null && cbsCost > 0) {
+      const ratio = cost / cbsCost;
+      $(`tbl-subopt-${algo}`).textContent = `${ratio.toFixed(3)}× (${cost - cbsCost >= 0 ? '+' : ''}${cost - cbsCost})`;
+    } else if (algo === 'cbs' && cost != null) {
+      $(`tbl-subopt-${algo}`).textContent = '1.000× (Optimal)';
+    } else {
+      $(`tbl-subopt-${algo}`).textContent = '—';
+    }
+
+    $(`tbl-ms-${algo}`).textContent = res.makespan != null ? `${res.makespan} steps` : '—';
+    $(`tbl-exp-${algo}`).textContent = res.expansions != null
+      ? res.expansions.toLocaleString()
+      : (algo === 'mappo' ? `Rollout (${res.steps_taken ?? res.makespan ?? 0} steps)` : '—');
+    $(`tbl-time-${algo}`).textContent = algo === 'mappo'
+      ? `${fmtTime(timeSec)} (policy inference)`
+      : `${fmtTime(timeSec)} (online search)`;
+
+    if (algo === 'mappo') {
+      const trainSec = res.training_time ?? state.policyData?.training_meta?.training_time_sec ?? 0;
+      const trainSteps = res.training_steps ?? state.policyData?.training_meta?.training_steps ?? 0;
+      $(`tbl-train-mappo`).textContent = `${fmtTime(trainSec)} (${Number(trainSteps).toLocaleString()} env steps)`;
+    }
+
+    $(`tbl-reason-${algo}`).textContent = res.status_reason || '—';
+
+    // 6 Formal Validation Criteria
+    formatBoolCell($(`val-obs-${algo}`), val.in_bounds_and_obstacle_free);
+    formatBoolCell($(`val-move-${algo}`), val.legal_moves);
+    formatBoolCell($(`val-vert-${algo}`), val.vertex_conflict_free);
+    formatBoolCell($(`val-edge-${algo}`), val.edge_swap_free);
+    formatBoolCell($(`val-goal-${algo}`), val.all_reached_goal);
+    formatBoolCell($(`val-occ-${algo}`), val.goal_occupancy_valid);
+  }
 }
 
-function currentSpec() {
+/* ------------------------------------------- Algorithm Execution --- */
+
+function currentProblemPayload() {
   return {
     matrix: state.matrix,
-    agents: state.agentList,
-    algorithm: state.algorithm,
-    options: {
-      heuristic: state.heuristic,
-      weight: state.weight,
-      time_limit: 8.0,
-    },
+    agents: state.agentList.map((a) => ({
+      name: a.name,
+      start: [...a.start],
+      goal: [...a.goal],
+    })),
+    heuristic: state.heuristic,
+    time_limit: Number($('time-limit').value || 5.0),
+    mappo_mode: state.mappoMode,
+    seed: state.seed,
   };
 }
 
-function beginSolve() {
-  state.running = true;
-  state.solution = null;
-  state.searchPaths = null;
-  state.conflicts = [];
-  state.conflictCount = 0;
-  state.expansions = 0;
-  state.t = 0;
-  state.playing = false;
-  $('log').innerHTML = '';
-  $('run').disabled = true;
-  $('play').disabled = true;
-  $('timeline').disabled = true;
-  showMetrics(null);
-  draw();
-}
+function runAlgorithmLocally(algo, payload) {
+  const problem = problemFromState({
+    matrix: payload.matrix,
+    agents: payload.agents,
+    allowDiagonals: false,
+  });
 
-function finishSolve(solution, runtime) {
-  state.running = false;
-  state.solution = solution;
-  state.searchPaths = null;
-  state.conflicts = [];
-  $('run').disabled = false;
-
-  if (!solution) {
-    log('no solution returned', 'conflict');
-    showMetrics(null, { runtime });
-    draw();
-    return;
-  }
-  log(`solved — cost ${solution.sumOfCosts}, makespan ${solution.makespan}, ${fmtMs(solution.runtime)}`, 'solved');
-  showMetrics(solution);
-  $('timeline').max = String(solution.makespan);
-  $('timeline').value = '0';
-  $('timeline').disabled = false;
-  $('play').disabled = false;
-  updateSnippet();
-  play();
-}
-
-/** In-page engine: pump the generator with a frame budget so the UI stays live. */
-function runJs() {
-  if (PYTHON_ONLY.has(state.algorithm)) {
-    log(`${state.algorithm} is only implemented in the Python engine; falling back to weighted CBS`, 'conflict');
-  }
-  const algorithm = PYTHON_ONLY.has(state.algorithm) ? 'wcbs' : state.algorithm;
-  const generator = solveGenerator(problemFromState({ matrix: state.matrix, agents: state.agentList }),
-    algorithm, {
-      heuristic: state.heuristic,
-      weight: state.weight,
-      timeLimit: 8,
+  if (algo === 'mappo') {
+    return mappoRollout(problem, state.policyData, {
+      mappo_mode: payload.mappo_mode,
+      seed: payload.seed,
     });
-  let solution = null;
+  }
 
-  const pump = () => {
-    const deadline = performance.now() + 10;   // ~10 ms of work per frame
-    for (;;) {
-      const step = generator.next();
-      if (step.done) {
-        finishSolve(solution ? {
-          paths: solution.paths,
-          sumOfCosts: solution.sumOfCosts,
-          makespan: solution.makespan,
-          expansions: solution.expansions,
-          runtime: solution.runtime,
-          valid: solution.valid,
-          algorithm: solution.algorithm,
-        } : null);
-        return;
-      }
-      const event = step.value;
-      if (event.kind === 'solved') solution = event;
-      handleEvent(event);
-      if (performance.now() > deadline) break;
-    }
-    draw();
-    requestAnimationFrame(pump);
+  const started = performance.now();
+  const sol = solve(problem, algo, {
+    heuristic: payload.heuristic,
+    timeLimit: payload.time_limit,
+    maxExpansions: 25000,
+  });
+  const runtime = (performance.now() - started) / 1000;
+
+  if (!sol) {
+    const val = validateSolution(problem, {});
+    return {
+      algorithm: algo,
+      available: true,
+      solved: false,
+      valid: false,
+      sum_of_costs: null,
+      sumOfCosts: null,
+      makespan: null,
+      expansions: null,
+      runtime,
+      status_reason: algo === 'cbs'
+        ? `No conflict-free solution found within ${payload.time_limit}s budget`
+        : 'Prioritized reservation table blocked a lower-priority agent',
+      paths: {},
+      validation: val,
+    };
+  }
+
+  const val = sol.validation || validateSolution(problem, sol.paths);
+  return {
+    algorithm: algo,
+    available: true,
+    solved: val.valid,
+    valid: val.valid,
+    sum_of_costs: sol.sumOfCosts,
+    sumOfCosts: sol.sumOfCosts,
+    makespan: sol.makespan,
+    expansions: sol.expansions,
+    runtime: sol.runtime ?? runtime,
+    status_reason: val.valid
+      ? (algo === 'cbs' ? 'Optimal conflict-free plan verified' : 'Valid prioritized plan verified')
+      : (val.violations?.[0] || 'Validation failed'),
+    paths: sol.paths,
+    validation: val,
   };
-  requestAnimationFrame(pump);
 }
 
-function runPython(spec) {
-  if (!engine.ready) { engine.pendingSolve = spec; return; }
-  engine.worker.postMessage({ type: 'solve', payload: spec });
-}
-
-function run() {
+async function runComparison(onlyAlgorithm = null) {
   if (state.running) return;
-  beginSolve();
-  if (state.engine === 'python' && engine.ready) runPython(currentSpec());
-  else runJs();
-}
-
-/* ------------------------------------------------------------ scenario --- */
-
-function regenerate() {
-  const built = buildScenario(state.scenario, { seed: state.seed, agents: state.agents });
-  state.matrix = built.matrix;
-  state.agentList = built.agents;
-  state.solution = null;
-  state.searchPaths = null;
-  state.conflicts = [];
-  state.t = 0;
-  $('scenario-blurb').textContent = built.blurb;
-  $('play').disabled = true;
-  $('timeline').disabled = true;
-  showMetrics(null, { expansions: 0, conflicts: 0 });
-  $('log').innerHTML = '';
-  updateSnippet();
-  draw();
-}
-
-function updateSnippet() {
-  const options = state.algorithm === 'wcbs' ? `, weight=${state.weight}` : '';
-  const heuristic = state.heuristic === 'manhattan' ? '' : `, heuristic="${state.heuristic}"`;
-  $('equivalent-code').innerHTML = `<span class="kw">import</span> pymapf
-
-scenario = pymapf.build_scenario(<span class="s">"${state.scenario}"</span>, n_agents=${state.agentList.length}, seed=${state.seed})
-trace = pymapf.SearchTrace()
-solution = pymapf.solve(scenario.to_problem(), <span class="s">"${state.algorithm}"</span>, observer=trace${options}${heuristic})
-
-<span class="kw">print</span>(solution.sum_of_costs, solution.makespan, trace.summary())`;
-}
-
-/* ------------------------------------------------------- map painting --- */
-
-let painting = null;
-
-function cellFromEvent(event) {
-  const rect = canvas.getBoundingClientRect();
-  const cell = rect.width / state.matrix[0].length;
-  const c = Math.floor((event.clientX - rect.left) / cell);
-  const r = Math.floor((event.clientY - rect.top) / cell);
-  if (r < 0 || c < 0 || r >= state.matrix.length || c >= state.matrix[0].length) return null;
-  return [r, c];
-}
-
-function paint(event) {
-  const cell = cellFromEvent(event);
-  if (!cell) return;
-  const [r, c] = cell;
-  // Never wall in a start or a goal: that would make the instance invalid.
-  if (state.agentList.some((a) => (a.start[0] === r && a.start[1] === c)
-    || (a.goal[0] === r && a.goal[1] === c))) return;
-  if (painting === null) painting = state.matrix[r][c] ? 0 : 1;
-  if (state.matrix[r][c] === painting) return;
-  state.matrix[r][c] = painting;
-  state.solution = null;
-  state.searchPaths = null;
-  draw();
-}
-
-canvas.addEventListener('pointerdown', (event) => {
-  canvas.setPointerCapture(event.pointerId);
-  painting = null;
-  paint(event);
-});
-canvas.addEventListener('pointermove', (event) => { if (event.buttons) paint(event); });
-canvas.addEventListener('pointerup', () => { painting = null; });
-
-/* ------------------------------------------------------------- charts --- */
-
-function svgElement(name, attributes) {
-  const element = document.createElementNS('http://www.w3.org/2000/svg', name);
-  for (const [key, value] of Object.entries(attributes)) element.setAttribute(key, value);
-  return element;
-}
-
-function lineChart(target, series, { xLabel, yLabel, log = false, formatY = String }) {
-  const svg = $(target);
-  svg.innerHTML = '';
-  const W = 420; const H = 260;
-  const pad = { l: 52, r: 16, t: 14, b: 38 };
-  const names = Object.keys(series).filter((k) => series[k].length);
-  if (!names.length) return;
-
-  const xs = names.flatMap((n) => series[n].map((p) => p[0]));
-  const ys = names.flatMap((n) => series[n].map((p) => p[1])).filter((v) => v > 0 || !log);
-  const xMin = Math.min(...xs); const xMax = Math.max(...xs);
-  let yMin = Math.min(...ys); let yMax = Math.max(...ys);
-  if (log) { yMin = Math.max(yMin, 1e-6); yMax = Math.max(yMax, yMin * 10); }
-  else { yMin = 0; yMax *= 1.12; }
-
-  const px = (v) => pad.l + ((v - xMin) / Math.max(1e-9, xMax - xMin)) * (W - pad.l - pad.r);
-  const py = (v) => {
-    const t = log
-      ? (Math.log10(Math.max(v, yMin)) - Math.log10(yMin)) / (Math.log10(yMax) - Math.log10(yMin))
-      : (v - yMin) / (yMax - yMin);
-    return H - pad.b - t * (H - pad.t - pad.b);
-  };
-
-  for (let i = 0; i <= 4; i += 1) {
-    const value = log
-      ? yMin * (yMax / yMin) ** (i / 4)
-      : yMin + (i / 4) * (yMax - yMin);
-    const y = py(value);
-    svg.appendChild(svgElement('line', {
-      x1: pad.l, x2: W - pad.r, y1: y, y2: y, stroke: css('--grid'), 'stroke-width': 1,
-    }));
-    const label = svgElement('text', {
-      x: pad.l - 8, y: y + 4, 'text-anchor': 'end', fill: css('--muted'), 'font-size': 10,
-    });
-    label.textContent = formatY(value);
-    svg.appendChild(label);
-  }
-
-  const colors = SERIES();
-  names.forEach((name, index) => {
-    const points = [...series[name]].sort((a, b) => a[0] - b[0]);
-    const color = colors[index % colors.length];
-    const path = points.map(([x, y], i) => `${i ? 'L' : 'M'}${px(x).toFixed(1)},${py(y).toFixed(1)}`).join(' ');
-    svg.appendChild(svgElement('path', {
-      d: path, fill: 'none', stroke: color, 'stroke-width': 2, 'stroke-linejoin': 'round', 'stroke-linecap': 'round',
-    }));
-    points.forEach(([x, y]) => {
-      svg.appendChild(svgElement('circle', {
-        cx: px(x), cy: py(y), r: 3.6, fill: color, stroke: css('--surface-1'), 'stroke-width': 1.4,
-      }));
-    });
-    const last = points[points.length - 1];
-    const label = svgElement('text', {
-      x: Math.min(px(last[0]) + 7, W - 4), y: py(last[1]) + 3.5,
-      fill: css('--ink-2'), 'font-size': 10.5, 'text-anchor': px(last[0]) > W - 60 ? 'end' : 'start',
-    });
-    label.textContent = name;
-    svg.appendChild(label);
-  });
-
-  const xTicks = [...new Set(xs)].sort((a, b) => a - b);
-  xTicks.forEach((value) => {
-    const label = svgElement('text', {
-      x: px(value), y: H - pad.b + 15, 'text-anchor': 'middle', fill: css('--muted'), 'font-size': 10,
-    });
-    label.textContent = String(value);
-    svg.appendChild(label);
-  });
-
-  const xTitle = svgElement('text', {
-    x: (W + pad.l) / 2, y: H - 6, 'text-anchor': 'middle', fill: css('--ink-2'), 'font-size': 11,
-  });
-  xTitle.textContent = xLabel;
-  svg.appendChild(xTitle);
-
-  const yTitle = svgElement('text', {
-    x: 12, y: (H - pad.b + pad.t) / 2, fill: css('--ink-2'), 'font-size': 11,
-    transform: `rotate(-90 12 ${(H - pad.b + pad.t) / 2})`, 'text-anchor': 'middle',
-  });
-  yTitle.textContent = yLabel;
-  svg.appendChild(yTitle);
-}
-
-function barChart(target, entries) {
-  const svg = $(target);
-  svg.innerHTML = '';
-  const W = 420; const H = 200;
-  const pad = { l: 96, r: 52, t: 12, b: 26 };
-  const colors = SERIES();
-  const rowHeight = (H - pad.t - pad.b) / Math.max(1, entries.length);
-
-  entries.forEach(([name, value], index) => {
-    const y = pad.t + index * rowHeight;
-    const barHeight = Math.min(26, rowHeight * 0.56);
-    const width = (value / 100) * (W - pad.l - pad.r);
-    svg.appendChild(svgElement('rect', {
-      x: pad.l, y: y + (rowHeight - barHeight) / 2, width: Math.max(2, width), height: barHeight,
-      rx: 4, fill: colors[index % colors.length],
-    }));
-    const label = svgElement('text', {
-      x: pad.l - 10, y: y + rowHeight / 2 + 4, 'text-anchor': 'end', fill: css('--ink-2'), 'font-size': 11.5,
-    });
-    label.textContent = name;
-    svg.appendChild(label);
-    const value_ = svgElement('text', {
-      x: pad.l + Math.max(2, width) + 8, y: y + rowHeight / 2 + 4, fill: css('--ink-2'), 'font-size': 11.5,
-    });
-    value_.textContent = `${value.toFixed(0)}%`;
-    svg.appendChild(value_);
-  });
-}
-
-/* ---------------------------------------------------------- benchmark --- */
-
-const bench = { rows: [], running: false };
-
-function benchmarkRow(row) {
-  bench.rows.push(row);
-  $('bench-status').textContent =
-    `${bench.rows.length} runs — latest: ${row.algorithm} on ${row.n_agents} agents ` +
-    `(${row.solved ? `${(1000 * row.runtime).toFixed(0)} ms` : 'no solution'})`;
-  renderBenchmark();
-}
-
-function benchmarkDone(rows) {
-  if (rows?.length) bench.rows = rows;
-  bench.running = false;
-  $('run-bench').disabled = false;
-  $('bench-status').textContent = `${bench.rows.length} runs complete`;
-  renderBenchmark();
-}
-
-function meanBy(rows, key) {
-  const buckets = {};
-  for (const row of rows) {
-    if (!row.solved || row[key] == null) continue;
-    (buckets[row.algorithm] ||= {});
-    (buckets[row.algorithm][row.n_agents] ||= []).push(row[key]);
-  }
-  const out = {};
-  for (const [algorithm, byCount] of Object.entries(buckets)) {
-    out[algorithm] = Object.entries(byCount)
-      .map(([count, values]) => [Number(count), values.reduce((a, b) => a + b, 0) / values.length])
-      .sort((a, b) => a[0] - b[0]);
-  }
-  return out;
-}
-
-function renderBenchmark() {
-  lineChart('chart-runtime', meanBy(bench.rows, 'runtime'), {
-    xLabel: 'agents', yLabel: 'runtime (s)', log: true,
-    formatY: (v) => (v >= 1 ? v.toFixed(1) : v >= 0.001 ? `${(v * 1000).toFixed(0)}ms` : v.toExponential(0)),
-  });
-  lineChart('chart-cost', meanBy(bench.rows, 'sum_of_costs'), {
-    xLabel: 'agents', yLabel: 'sum of costs', formatY: (v) => v.toFixed(0),
-  });
-
-  const algorithms = [...new Set(bench.rows.map((r) => r.algorithm))];
-  barChart('chart-success', algorithms.map((algorithm) => {
-    const rows = bench.rows.filter((r) => r.algorithm === algorithm);
-    return [algorithm, rows.length ? (100 * rows.filter((r) => r.solved).length) / rows.length : 0];
-  }));
-
-  const table = $('bench-table');
-  table.innerHTML = '<thead><tr><th>agents</th><th>solver</th><th>cost</th><th>makespan</th><th>ms</th></tr></thead>';
-  const body = document.createElement('tbody');
-  for (const row of bench.rows.slice(-40).reverse()) {
-    const tr = document.createElement('tr');
-    tr.innerHTML = `<td>${row.n_agents}</td><td>${row.algorithm}</td>`
-      + (row.solved
-        ? `<td>${row.sum_of_costs}</td><td>${row.makespan}</td><td>${(1000 * row.runtime).toFixed(1)}</td>`
-        : '<td class="fail" colspan="3">no solution within the budget</td>');
-    body.appendChild(tr);
-  }
-  table.appendChild(body);
-}
-
-function runBenchmark() {
-  if (bench.running) return;
-  bench.running = true;
-  bench.rows = [];
-  $('run-bench').disabled = true;
-  const scenario = $('bench-scenario').value;
-  const spec = {
-    scenario,
-    agent_counts: [2, 4, 6, 8, 10, 12],
-    algorithms: ['cbs', 'wcbs', 'prioritized'],
-    seeds: [0, 1, 2],
-    solver_kwargs: { time_limit: 2.0 },
-  };
-
-  if (state.engine === 'python' && engine.ready) {
-    $('bench-status').textContent = 'running in Python (WASM)…';
-    engine.worker.postMessage({ type: 'benchmark', payload: spec });
+  const payload = currentProblemPayload();
+  const check = validateProblemSpec(payload);
+  if (!check.ok) {
+    setFeedback(`Invalid problem configuration: ${check.errors[0]}`, 'error');
+    log(`Problem validation failed: ${check.errors.join(' | ')}`, 'conflict');
     return;
   }
 
-  // JS fallback: yield to the browser between instances so the page stays alive.
-  $('bench-status').textContent = 'running in the JS engine…';
-  const jobs = [];
-  for (const count of spec.agent_counts) {
-    for (const seed of spec.seeds) {
-      for (const algorithm of spec.algorithms) jobs.push({ count, seed, algorithm });
+  state.running = true;
+  $('run-compare').disabled = true;
+  $('run-single').disabled = true;
+  $('hero-run-compare').disabled = true;
+
+  const targets = onlyAlgorithm ? [onlyAlgorithm] : ALGORITHMS;
+  clearLog();
+  log(
+    `Running ${onlyAlgorithm ? ALGORITHM_LABELS[onlyAlgorithm] : '3-way comparison'} on ${state.matrix.length}×${state.matrix[0].length} grid (${state.agentList.length} agents, heuristic=${state.heuristic}, MAPPO=${state.mappoMode})…`,
+  );
+
+  try {
+    if (state.backendAvailable) {
+      if (!onlyAlgorithm) {
+        const resp = await fetch('/api/compare', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        const data = await resp.json();
+        if (!resp.ok || !data.ok) {
+          throw new Error((data.errors && data.errors.join('; ')) || 'Comparison API error');
+        }
+        state.comparison = data.algorithms;
+      } else {
+        const resp = await fetch('/api/solve', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ...payload, algorithm: onlyAlgorithm }),
+        });
+        const data = await resp.json();
+        if (!resp.ok || !data.ok) {
+          throw new Error((data.errors && data.errors.join('; ')) || 'Solve API error');
+        }
+        state.comparison[onlyAlgorithm] = data.result;
+      }
+    } else {
+      for (const algo of targets) {
+        state.comparison[algo] = runAlgorithmLocally(algo, payload);
+      }
     }
+
+    for (const algo of targets) {
+      const r = state.comparison[algo];
+      if (!r) continue;
+      const cost = r.sum_of_costs ?? r.sumOfCosts;
+      const timeSec = algo === 'mappo' ? (r.inference_time ?? r.runtime) : r.runtime;
+      if (r.solved && r.valid) {
+        log(
+          `[${ALGORITHM_LABELS[algo]}] ✓ SOLVED & VALID — sum_of_costs=${cost}, makespan=${r.makespan}, time=${fmtTime(timeSec)} (${r.status_reason})`,
+          'solved',
+        );
+      } else {
+        const vMsg = r.validation?.violations?.[0] ? ` | First violation: ${r.validation.violations[0]}` : '';
+        log(
+          `[${ALGORITHM_LABELS[algo]}] ✕ UNSOLVED — ${r.status_reason}${vMsg}`,
+          'conflict',
+        );
+      }
+    }
+
+    updateComparisonUI();
+    syncTransportToResults();
+    drawAllCanvases();
+    if (state.horizon > 0) {
+      togglePlay();
+    }
+  } catch (err) {
+    log(`Execution error: ${err.message || err}`, 'conflict');
+    setFeedback(`Execution error: ${err.message || err}`, 'error');
+  } finally {
+    state.running = false;
+    $('run-compare').disabled = false;
+    $('run-single').disabled = false;
+    $('hero-run-compare').disabled = false;
   }
-  let index = 0;
-  const step = () => {
-    if (index >= jobs.length) { benchmarkDone(); return; }
-    const job = jobs[index++];
-    try {
-      const built = buildScenario(scenario, { seed: job.seed, agents: job.count });
-      const problem = problemFromState(built);
-      const started = performance.now();
-      const generator = solveGenerator(problem, job.algorithm, { weight: 1.5, timeLimit: 2 });
-      let solution = null;
-      let step_ = generator.next();
-      while (!step_.done) { if (step_.value.kind === 'solved') solution = step_.value; step_ = generator.next(); }
-      benchmarkRow({
-        n_agents: job.count,
-        algorithm: job.algorithm,
-        solved: !!solution,
-        runtime: (performance.now() - started) / 1000,
-        sum_of_costs: solution?.sumOfCosts ?? null,
-        makespan: solution?.makespan ?? null,
-        expansions: solution?.expansions ?? 0,
-      });
-    } catch (error) {
-      benchmarkRow({ n_agents: job.count, algorithm: job.algorithm, solved: false, runtime: 0 });
-    }
-    setTimeout(step, 0);
-  };
-  step();
 }
 
-/* --------------------------------------------------------- code panel --- */
+async function trainMappoOnActiveGrid() {
+  if (state.running) return;
+  const payload = currentProblemPayload();
+  const check = validateProblemSpec(payload);
+  if (!check.ok) {
+    setFeedback(`Fix problem configuration before training: ${check.errors[0]}`, 'error');
+    return;
+  }
 
-const EXAMPLES = {
-  'Solve and inspect': `import pymapf
+  const steps = Number($('mappo-train-steps').value || 16384);
+  const btn = $('train-mappo-btn');
+  const statusEl = $('mappo-policy-status');
 
-scenario = pymapf.build_scenario("warehouse", n_agents=8, seed=3)
-trace = pymapf.SearchTrace()
-solution = pymapf.solve(scenario.to_problem(), "wcbs", observer=trace, weight=1.5)
+  if (!state.backendAvailable) {
+    statusEl.textContent = 'Using pre-trained MAPPO policy checkpoint (start Python server for live on-instance training).';
+    return;
+  }
 
-print("cost     ", solution.sum_of_costs)
-print("makespan ", solution.makespan)
-print("valid    ", solution.is_valid())
-print("search   ", trace.summary())
-`,
-  'Compare every solver': `import pymapf
-from pymapf.benchmark import compare_algorithms
+  state.running = true;
+  btn.disabled = true;
+  btn.textContent = 'Training MAPPO…';
+  statusEl.textContent = `Training MAPPO on active ${state.matrix.length}×${state.matrix[0].length} grid for ${steps.toLocaleString()} steps…`;
+  log(`Starting on-instance MAPPO training (${steps.toLocaleString()} environment steps)…`);
 
-report = compare_algorithms(
-    ["corner_swap", "warehouse", "random_obstacles"],
-    ["cbs", "wcbs", "prioritized"],
-    time_limit=3.0,
-)
-print(report.table())
-`,
-  'Where prioritized planning breaks': `import pymapf
+  try {
+    const resp = await fetch('/api/train_mappo', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        ...payload,
+        steps,
+        mappo_mode: state.mappoMode,
+      }),
+    });
+    const data = await resp.json();
+    if (!resp.ok || !data.ok) {
+      throw new Error((data.errors && data.errors.join('; ')) || 'MAPPO training error');
+    }
+    state.comparison.mappo = data.result;
+    const tSec = data.result.training_time ?? 0;
+    statusEl.textContent = `Active policy: Instance-trained MAPPO (${steps.toLocaleString()} steps in ${fmtTime(tSec)}).`;
+    log(
+      `[MAPPO Training] Completed ${steps.toLocaleString()} steps in ${fmtTime(tSec)} → rollout ${data.result.solved ? 'SOLVED' : 'UNSOLVED'} (${data.result.status_reason})`,
+      data.result.solved ? 'solved' : 'conflict',
+    );
+    updateComparisonUI();
+    syncTransportToResults();
+    drawAllCanvases();
+  } catch (err) {
+    statusEl.textContent = `Training failed: ${err.message || err}`;
+    log(`MAPPO training failed: ${err.message || err}`, 'conflict');
+  } finally {
+    state.running = false;
+    btn.disabled = false;
+    btn.textContent = 'Train on Active Grid';
+  }
+}
 
-# Prioritized planning is fast but incomplete: with a bad order, an agent can
-# be locked out of a corridor that a joint plan would have shared.
-scenario = pymapf.build_scenario("bottleneck", n_agents=6, seed=4)
-problem = scenario.to_problem()
+/* ------------------------------------------- Interactive 2D Grid Editor --- */
 
-for algorithm in ("prioritized", "wcbs"):
-    trace = pymapf.SearchTrace()
-    solution = pymapf.solve(problem, algorithm, observer=trace, time_limit=5.0)
-    print(algorithm, "->", "cost %d" % solution.sum_of_costs if solution else "NO SOLUTION")
-    if not solution:
-        print("   ", trace.of_kind("failed")[-1]["reason"])
-`,
-  'Design a map by hand': `import pymapf
-from pymapf.scenarios import from_ascii, to_ascii
+function loadScenarioPreset(name = state.scenario) {
+  state.scenario = name;
+  const spec = SCENARIOS[name];
+  $('scenario-blurb').textContent = spec?.blurb || '';
 
-scenario = from_ascii("""
-##########
-#a......A#
-#.######.#
-#B......b#
-##########
-""")
-print(to_ascii(scenario))
+  const maxAgents = name === 'corner_swap' ? 8 : 10;
+  $('agents').max = String(maxAgents);
+  if (state.agents > maxAgents) state.agents = maxAgents;
 
-solution = pymapf.solve(scenario.to_problem(), "cbs")
-for name, path in solution.paths.items():
-    print(name, "->", len(path) - 1, "steps")
-`,
-  'Register your own solver': `import pymapf
-from pymapf.core import MAPFSolver, Solution, register_solver
-from pymapf.algorithms import space_time_astar
+  let built;
+  try {
+    built = buildScenario(name, { agents: state.agents, seed: state.seed });
+  } catch (e) {
+    state.agents = Math.max(2, state.agents - 1);
+    built = buildScenario(name, { agents: state.agents, seed: state.seed });
+  }
 
+  state.matrix = built.matrix.map((row) => [...row]);
+  state.agentList = built.agents.map((a) => ({
+    name: a.name,
+    start: [...a.start],
+    goal: [...a.goal],
+  }));
+  state.activeAgentIndex = 0;
 
-@register_solver("selfish")
-class Selfish(MAPFSolver):
-    """Every agent takes its own shortest path and ignores the others."""
+  syncRosterAndControls();
+  resetComparisonResults();
+  setFeedback(`Loaded '${spec.label}' (${state.matrix.length}×${state.matrix[0].length}, ${state.agentList.length} agents, seed ${state.seed}).`, 'ok');
+}
 
-    def solve(self, problem, observer=None):
-        paths = {}
-        for agent in problem.agents:
-            paths[agent.name] = space_time_astar(problem.grid, agent.start, agent.goal)
-        return Solution(paths=paths, algorithm=self.name)
+function resizeEmptyGrid() {
+  const rows = clamp(Number($('grid-rows').value) || 12, 5, 22);
+  const cols = clamp(Number($('grid-cols').value) || 12, 5, 22);
+  const matrix = Array.from({ length: rows }, (_, r) =>
+    Array.from({ length: cols }, (_, c) => (r === 0 || r === rows - 1 || c === 0 || c === cols - 1 ? 1 : 0)));
 
+  const freeCells = [];
+  for (let r = 1; r < rows - 1; r += 1) {
+    for (let c = 1; c < cols - 1; c += 1) freeCells.push([r, c]);
+  }
+  const count = Math.min(state.agentList.length || 4, Math.floor(freeCells.length / 2));
+  const agents = [];
+  for (let i = 0; i < count; i += 1) {
+    agents.push({
+      name: agentName(i),
+      start: [...freeCells[i]],
+      goal: [...freeCells[freeCells.length - 1 - i]],
+    });
+  }
 
-scenario = pymapf.build_scenario("corner_swap", n_agents=4)
-solution = pymapf.solve(scenario.to_problem(), "selfish")
-print("registered solvers:", pymapf.available_solvers())
-print("cost", solution.sum_of_costs, "— valid?", solution.is_valid())
-print("first conflict:", solution.first_conflict())
-`,
+  state.matrix = matrix;
+  state.agentList = agents;
+  state.activeAgentIndex = 0;
+  syncRosterAndControls();
+  resetComparisonResults();
+  setFeedback(`Resized to ${rows}×${cols} empty bordered grid with ${agents.length} agents.`, 'ok');
+}
+
+function clearInteriorObstacles() {
+  const rows = state.matrix.length;
+  const cols = state.matrix[0]?.length || 0;
+  for (let r = 1; r < rows - 1; r += 1) {
+    for (let c = 1; c < cols - 1; c += 1) {
+      state.matrix[r][c] = 0;
+    }
+  }
+  resetComparisonResults();
+  setFeedback('Cleared all interior obstacles.', 'ok');
+}
+
+function addNewAgentAt(targetCell = null) {
+  const rows = state.matrix.length;
+  const cols = state.matrix[0]?.length || 0;
+  const occupiedStarts = new Set(state.agentList.map((a) => `${a.start[0]},${a.start[1]}`));
+  const occupiedGoals = new Set(state.agentList.map((a) => `${a.goal[0]},${a.goal[1]}`));
+
+  let start = null;
+  if (targetCell) {
+    const [tr, tc] = targetCell;
+    if (state.matrix[tr]?.[tc] === 0 && !occupiedStarts.has(`${tr},${tc}`)) {
+      start = [tr, tc];
+    } else {
+      setFeedback(`Cannot add agent start at (${tr}, ${tc}): cell is blocked or already has a start.`, 'error');
+      return;
+    }
+  }
+
+  const freeStarts = [];
+  const freeGoals = [];
+  for (let r = 0; r < rows; r += 1) {
+    for (let c = 0; c < cols; c += 1) {
+      if (state.matrix[r][c] !== 0) continue;
+      if (!occupiedStarts.has(`${r},${c}`)) freeStarts.push([r, c]);
+      if (!occupiedGoals.has(`${r},${c}`)) freeGoals.push([r, c]);
+    }
+  }
+
+  if (!start) start = freeStarts[0];
+  if (!start || !freeGoals.length) {
+    setFeedback('No free unoccupied cells remaining to add another agent.', 'error');
+    return;
+  }
+
+  // Pick a free goal furthest from start
+  let bestGoal = freeGoals[0];
+  let bestDist = -1;
+  for (const cand of freeGoals) {
+    if (cand[0] === start[0] && cand[1] === start[1] && freeGoals.length > 1) continue;
+    const d = Math.abs(cand[0] - start[0]) + Math.abs(cand[1] - start[1]);
+    if (d > bestDist) {
+      bestDist = d;
+      bestGoal = cand;
+    }
+  }
+
+  const name = agentName(state.agentList.length);
+  state.agentList.push({ name, start: [...start], goal: [...bestGoal] });
+  state.activeAgentIndex = state.agentList.length - 1;
+  state.agents = state.agentList.length;
+
+  syncRosterAndControls();
+  resetComparisonResults();
+  setFeedback(`Added Agent ${name} with start (${start[0]}, ${start[1]}) and goal (${bestGoal[0]}, ${bestGoal[1]}).`, 'ok');
+}
+
+function removeActiveAgent() {
+  if (state.agentList.length <= 1) {
+    setFeedback('At least 1 agent is required in the problem.', 'error');
+    return;
+  }
+  const removed = state.agentList.splice(state.activeAgentIndex, 1)[0];
+  // Rename remaining agents sequentially A, B, C... so indices stay clean
+  state.agentList.forEach((a, i) => { a.name = agentName(i); });
+  state.activeAgentIndex = Math.max(0, Math.min(state.activeAgentIndex, state.agentList.length - 1));
+  state.agents = state.agentList.length;
+
+  syncRosterAndControls();
+  resetComparisonResults();
+  setFeedback(`Removed agent ${removed.name}; ${state.agentList.length} agents active.`, 'ok');
+}
+
+function handleBoardCellAction(r, c, dragValue = null) {
+  const rows = state.matrix.length;
+  const cols = state.matrix[0]?.length || 0;
+  if (r < 0 || r >= rows || c < 0 || c >= cols) return null;
+
+  const hasStart = state.agentList.find((a) => a.start[0] === r && a.start[1] === c);
+  const hasGoal = state.agentList.find((a) => a.goal[0] === r && a.goal[1] === c);
+
+  if (state.tool === 'wall') {
+    if (hasStart || hasGoal) {
+      setFeedback(
+        `Cannot place obstacle on (${r}, ${c}) — occupied by Agent ${(hasStart || hasGoal).name}'s ${hasStart ? 'start' : 'goal'}.`,
+        'error',
+      );
+      return null;
+    }
+    const nextVal = dragValue != null ? dragValue : (state.matrix[r][c] ? 0 : 1);
+    state.matrix[r][c] = nextVal;
+    resetComparisonResults();
+    updateEquivalentCode();
+    return nextVal;
+  }
+
+  if (state.tool === 'start') {
+    const active = state.agentList[state.activeAgentIndex];
+    if (!active) return null;
+    if (state.matrix[r][c]) {
+      setFeedback(`Cannot move Agent ${active.name} start to (${r}, ${c}): cell is an obstacle.`, 'error');
+      return null;
+    }
+    if (hasStart && hasStart.name !== active.name) {
+      setFeedback(`Cannot move Agent ${active.name} start to (${r}, ${c}): Agent ${hasStart.name} already starts there.`, 'error');
+      return null;
+    }
+    active.start = [r, c];
+    syncRosterAndControls();
+    resetComparisonResults();
+    setFeedback(`Moved Agent ${active.name} start to (${r}, ${c}).`, 'ok');
+    return null;
+  }
+
+  if (state.tool === 'goal') {
+    const active = state.agentList[state.activeAgentIndex];
+    if (!active) return null;
+    if (state.matrix[r][c]) {
+      setFeedback(`Cannot move Agent ${active.name} goal to (${r}, ${c}): cell is an obstacle.`, 'error');
+      return null;
+    }
+    if (hasGoal && hasGoal.name !== active.name) {
+      setFeedback(`Cannot move Agent ${active.name} goal to (${r}, ${c}): Agent ${hasGoal.name} already has that goal.`, 'error');
+      return null;
+    }
+    active.goal = [r, c];
+    syncRosterAndControls();
+    resetComparisonResults();
+    setFeedback(`Moved Agent ${active.name} goal to (${r}, ${c}).`, 'ok');
+    return null;
+  }
+
+  if (state.tool === 'add') {
+    addNewAgentAt([r, c]);
+    return null;
+  }
+
+  return null;
+}
+
+function wireBoardInteractions() {
+  const board = $('board');
+  let paintingWall = null;
+
+  const cellFromEvent = (ev) => {
+    const rect = board.getBoundingClientRect();
+    const rows = state.matrix.length;
+    const cols = state.matrix[0]?.length || 1;
+    const c = Math.floor(((ev.clientX - rect.left) / rect.width) * cols);
+    const r = Math.floor(((ev.clientY - rect.top) / rect.height) * rows);
+    return [r, c];
+  };
+
+  board.addEventListener('pointerdown', (ev) => {
+    const [r, c] = cellFromEvent(ev);
+    const res = handleBoardCellAction(r, c, null);
+    if (state.tool === 'wall' && res !== null) {
+      paintingWall = res;
+      board.setPointerCapture(ev.pointerId);
+    }
+  });
+
+  board.addEventListener('pointermove', (ev) => {
+    const [r, c] = cellFromEvent(ev);
+    const rows = state.matrix.length;
+    const cols = state.matrix[0]?.length || 1;
+    if (r >= 0 && r < rows && c >= 0 && c < cols) {
+      $('cursor-coords').textContent = `Cell: (${r}, ${c})`;
+      if (paintingWall !== null && state.tool === 'wall') {
+        handleBoardCellAction(r, c, paintingWall);
+      }
+    }
+  });
+
+  const stopPaint = () => { paintingWall = null; };
+  board.addEventListener('pointerup', stopPaint);
+  board.addEventListener('pointercancel', stopPaint);
+}
+
+/* ------------------------------------------- Batch Experiments & Charts --- */
+
+const svgEl = (tag, attrs = {}, text = null) => {
+  const node = document.createElementNS('http://www.w3.org/2000/svg', tag);
+  for (const [k, v] of Object.entries(attrs)) node.setAttribute(k, String(v));
+  if (text != null) node.textContent = text;
+  return node;
 };
 
-function showExecResult(data) {
-  const output = $('code-output');
-  output.textContent = data.output || '(no output)';
-  if (data.error) {
-    const block = document.createElement('span');
-    block.className = 'err';
-    block.textContent = `\n${data.error}`;
-    output.appendChild(block);
-  }
-  $('run-code').disabled = false;
+const ALGO_COLORS = () => ({
+  prioritized: css('--s2'),
+  cbs: css('--s1'),
+  mappo: css('--s3'),
+});
 
-  if (data.solution?.paths) {
-    if (data.solution.matrix) {
-      state.matrix = data.solution.matrix;
-      state.agentList = data.solution.agents;
-    }
-    state.conflictCount = 0;
-    finishSolve({
-      paths: data.solution.paths,
-      sumOfCosts: data.solution.sum_of_costs,
-      makespan: data.solution.makespan,
-      expansions: data.solution.expansions,
-      runtime: data.solution.runtime,
-      valid: true,
-      algorithm: data.solution.algorithm,
-    });
-    log('plan loaded from the Python tab — switch to Visual to watch it', 'solved');
-  }
-}
+function renderLineChart(svg, rows, field, { logScale = false, yLabel = '' } = {}) {
+  svg.innerHTML = '';
+  const W = 420;
+  const H = 260;
+  const pad = { l: 54, r: 20, t: 28, b: 38 };
+  const plotW = W - pad.l - pad.r;
+  const plotH = H - pad.t - pad.b;
 
-function runCode() {
-  if (!engine.ready) {
-    $('code-output').textContent =
-      'The Python runtime is not available in this browser session, so the Python '
-      + 'tab cannot run. The Visual and Benchmark tabs still work.';
+  const usable = rows.filter((r) => r[field] != null && (!logScale || r[field] > 0));
+  if (!usable.length) {
+    svg.appendChild(svgEl('text', {
+      x: W / 2, y: H / 2, 'text-anchor': 'middle', fill: css('--muted'), 'font-size': 12,
+    }, 'Run batch experiment to plot results'));
     return;
   }
-  $('run-code').disabled = true;
-  $('code-output').textContent = 'running…';
-  engine.worker.postMessage({ type: 'exec', payload: $('editor').value });
-}
 
-/* ----------------------------------------------------------------- ui --- */
+  const xs = [...new Set(rows.map((r) => r.n_agents))].sort((a, b) => a - b);
+  const tr = (v) => (logScale ? Math.log10(Math.max(1e-5, v)) : v);
+  const vals = usable.map((r) => tr(r[field]));
+  let yMin = Math.min(...vals);
+  let yMax = Math.max(...vals);
+  if (yMin === yMax) { yMin -= 0.5; yMax += 0.5; }
+  const span = yMax - yMin;
+  yMin -= span * 0.08;
+  yMax += span * 0.12;
 
-function selectEngine(name) {
-  state.engine = name;
-  document.querySelectorAll('#engine button').forEach((button) => {
-    button.setAttribute('aria-pressed', String(button.dataset.engine === name));
-  });
-}
+  const xOf = (x) => pad.l + (xs.length === 1 ? plotW / 2 : ((x - xs[0]) / (xs[xs.length - 1] - xs[0])) * plotW);
+  const yOf = (v) => pad.t + plotH - ((tr(v) - yMin) / (yMax - yMin)) * plotH;
 
-function selectTab(id) {
-  for (const tab of ['visual', 'code', 'bench']) {
-    const selected = tab === id;
-    $(`tab-${tab}`).setAttribute('aria-selected', String(selected));
-    $(`panel-${tab}`).hidden = !selected;
+  // Grid & Y ticks
+  for (let i = 0; i <= 4; i += 1) {
+    const gy = pad.t + (i / 4) * plotH;
+    const raw = yMax - (i / 4) * (yMax - yMin);
+    const val = logScale ? 10 ** raw : raw;
+    svg.appendChild(svgEl('line', {
+      x1: pad.l, x2: W - pad.r, y1: gy, y2: gy, stroke: css('--grid'),
+    }));
+    const label = logScale
+      ? (val >= 0.1 ? `${val.toFixed(2)}s` : `${(val * 1000).toFixed(1)}ms`)
+      : val.toFixed(0);
+    svg.appendChild(svgEl('text', {
+      x: pad.l - 6, y: gy + 4, 'text-anchor': 'end', fill: css('--muted'), 'font-size': 10,
+    }, label));
   }
-  if (id === 'visual') draw();
-}
 
-function wire() {
-  const scenarioSelect = $('scenario');
-  const benchSelect = $('bench-scenario');
-  for (const [name, spec] of Object.entries(SCENARIOS)) {
-    scenarioSelect.appendChild(new Option(spec.label, name));
-    benchSelect.appendChild(new Option(spec.label, name));
+  // X ticks
+  for (const x of xs) {
+    const gx = xOf(x);
+    svg.appendChild(svgEl('text', {
+      x: gx, y: H - 12, 'text-anchor': 'middle', fill: css('--muted'), 'font-size': 11,
+    }, `${x} agents`));
   }
-  scenarioSelect.value = state.scenario;
-  benchSelect.value = 'random_obstacles';
 
-  const examples = $('examples');
-  for (const name of Object.keys(EXAMPLES)) examples.appendChild(new Option(name, name));
-  $('editor').value = EXAMPLES[Object.keys(EXAMPLES)[0]];
-  examples.addEventListener('change', () => { $('editor').value = EXAMPLES[examples.value]; });
+  if (yLabel) {
+    svg.appendChild(svgEl('text', {
+      x: pad.l, y: 15, fill: css('--muted'), 'font-size': 10,
+    }, yLabel));
+  }
 
-  scenarioSelect.addEventListener('change', () => { state.scenario = scenarioSelect.value; regenerate(); });
-  $('agents').addEventListener('input', (event) => {
-    state.agents = Number(event.target.value);
-    $('agents-out').value = event.target.value;
-    regenerate();
-  });
-  $('seed').addEventListener('input', (event) => {
-    state.seed = Number(event.target.value);
-    $('seed-out').value = event.target.value;
-    regenerate();
-  });
-  $('algorithm').addEventListener('change', (event) => {
-    state.algorithm = event.target.value;
-    $('algorithm-blurb').textContent = ALGORITHM_BLURBS[state.algorithm];
-    $('weight-group').style.display = state.algorithm === 'wcbs' ? '' : 'none';
-    if (PYTHON_ONLY.has(state.algorithm)) {
-      if (engine.ready) selectEngine('python');
-      else $('algorithm-blurb').textContent =
-        `${ALGORITHM_BLURBS[state.algorithm]} — needs the Python runtime, which is not available here.`;
+  const palette = ALGO_COLORS();
+  let lx = pad.l + 80;
+  for (const algo of ALGORITHMS) {
+    const color = palette[algo];
+    const pts = [];
+    for (const x of xs) {
+      const sub = usable.filter((r) => r.algorithm === algo && r.n_agents === x);
+      if (!sub.length) continue;
+      const mean = sub.reduce((acc, r) => acc + r[field], 0) / sub.length;
+      pts.push([xOf(x), yOf(mean)]);
     }
-    updateSnippet();
-  });
-  $('weight').addEventListener('input', (event) => {
-    state.weight = Number(event.target.value);
-    $('weight-out').value = event.target.value;
-    updateSnippet();
-  });
-  $('heuristic').addEventListener('change', (event) => { state.heuristic = event.target.value; updateSnippet(); });
+    if (pts.length > 1) {
+      const d = pts.map(([px, py], i) => `${i ? 'L' : 'M'}${px.toFixed(1)},${py.toFixed(1)}`).join(' ');
+      svg.appendChild(svgEl('path', { d, fill: 'none', stroke: color, 'stroke-width': 2.2 }));
+    }
+    for (const [px, py] of pts) {
+      svg.appendChild(svgEl('circle', {
+        cx: px, cy: py, r: 3.8, fill: color, stroke: css('--surface-1'), 'stroke-width': 1.4,
+      }));
+    }
+    svg.appendChild(svgEl('circle', { cx: lx, cy: 12, r: 4, fill: color }));
+    svg.appendChild(svgEl('text', { x: lx + 7, y: 15, fill: css('--ink'), 'font-size': 10.5 }, ALGORITHM_LABELS[algo]));
+    lx += 110;
+  }
+}
 
-  document.querySelectorAll('#engine button').forEach((button) => {
-    button.addEventListener('click', () => {
-      if (button.dataset.engine === 'python' && !engine.ready && engine.failed) return;
-      selectEngine(button.dataset.engine);
+function renderSuccessChart(svg, summary) {
+  svg.innerHTML = '';
+  const W = 420;
+  const paddingL = 130;
+  const barW = W - paddingL - 58;
+  const palette = ALGO_COLORS();
+
+  ALGORITHMS.forEach((algo, idx) => {
+    const item = summary[algo] || { success_rate: 0 };
+    const rate = item.success_rate || 0;
+    const y = 26 + idx * 52;
+    const color = palette[algo];
+
+    svg.appendChild(svgEl('text', {
+      x: paddingL - 10, y: y + 17, 'text-anchor': 'end', fill: css('--ink'), 'font-size': 12, 'font-weight': 600,
+    }, ALGORITHM_LABELS[algo]));
+    svg.appendChild(svgEl('rect', {
+      x: paddingL, y, width: barW, height: 24, rx: 4, fill: css('--surface-2'),
+    }));
+    svg.appendChild(svgEl('rect', {
+      x: paddingL, y, width: Math.max(2, barW * rate), height: 24, rx: 4, fill: color,
+    }));
+    svg.appendChild(svgEl('text', {
+      x: paddingL + barW + 8, y: y + 16, fill: css('--ink'), 'font-size': 11.5,
+    }, `${Math.round(rate * 100)}%`));
+  });
+}
+
+function summarizeLocalBatch(rows) {
+  const cbsCosts = {};
+  for (const r of rows) {
+    if (r.algorithm === 'cbs' && r.solved && r.sum_of_costs != null) {
+      cbsCosts[`${r.scenario}:${r.n_agents}:${r.seed}`] = r.sum_of_costs;
+    }
+  }
+  const summary = {};
+  for (const algo of ALGORITHMS) {
+    const subset = rows.filter((r) => r.algorithm === algo);
+    const solved = subset.filter((r) => r.solved && r.valid);
+    const total = subset.length;
+    const ratios = [];
+    for (const r of solved) {
+      const ref = cbsCosts[`${r.scenario}:${r.n_agents}:${r.seed}`];
+      if (ref && ref > 0 && r.sum_of_costs != null) ratios.push(r.sum_of_costs / ref);
+    }
+    summary[algo] = {
+      instances: total,
+      solved: solved.length,
+      success_rate: total ? solved.length / total : 0,
+      valid_rate: total ? subset.filter((r) => r.valid).length / total : 0,
+      mean_cost: solved.length ? solved.reduce((a, b) => a + b.sum_of_costs, 0) / solved.length : null,
+      mean_makespan: solved.length ? solved.reduce((a, b) => a + b.makespan, 0) / solved.length : null,
+      mean_runtime: total ? subset.reduce((a, b) => a + b.runtime, 0) / total : 0,
+      mean_suboptimality_vs_cbs: ratios.length ? ratios.reduce((a, b) => a + b, 0) / ratios.length : null,
+      timing_label: algo === 'mappo' ? 'Rollout inference time (policy pre-trained)' : 'Online search planning time',
+    };
+  }
+  return summary;
+}
+
+function renderBatchResults(batch) {
+  state.batchData = batch;
+  $('export-csv').disabled = !batch || !batch.rows?.length;
+
+  // 1. Aggregate summary table
+  const sumBody = $('bench-summary-body');
+  sumBody.innerHTML = '';
+  for (const algo of ALGORITHMS) {
+    const s = batch.summary?.[algo];
+    if (!s) continue;
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td><strong>${ALGORITHM_LABELS[algo]}</strong></td>
+      <td>${s.instances}</td>
+      <td class="${s.success_rate >= 0.8 ? 'cell-pass' : (s.success_rate > 0 ? '' : 'cell-fail')}">${(s.success_rate * 100).toFixed(1)}% (${s.solved}/${s.instances})</td>
+      <td>${(s.valid_rate * 100).toFixed(1)}%</td>
+      <td>${s.mean_cost != null ? s.mean_cost.toFixed(1) : '—'}</td>
+      <td>${s.mean_makespan != null ? s.mean_makespan.toFixed(1) : '—'}</td>
+      <td>${s.mean_suboptimality_vs_cbs != null ? `${s.mean_suboptimality_vs_cbs.toFixed(3)}×` : '—'}</td>
+      <td>${fmtTime(s.mean_runtime)}</td>
+      <td><span class="hint">${s.timing_label}</span></td>
+    `;
+    sumBody.appendChild(tr);
+  }
+
+  // 2. Charts
+  renderLineChart($('chart-runtime'), batch.rows, 'runtime', {
+    logScale: true,
+    yLabel: 'Runtime (log scale)',
+  });
+  renderLineChart(
+    $('chart-cost'),
+    batch.rows.filter((r) => r.solved && r.sum_of_costs != null),
+    'sum_of_costs',
+    { logScale: false, yLabel: 'Sum of Path Costs' },
+  );
+  renderSuccessChart($('chart-success'), batch.summary);
+
+  // 3. Per-instance table
+  const table = $('bench-table');
+  table.innerHTML = `
+    <thead>
+      <tr>
+        <th>Agents</th>
+        <th>Seed</th>
+        <th>Algorithm</th>
+        <th>Solved</th>
+        <th>Valid</th>
+        <th>Cost</th>
+        <th>Makespan</th>
+        <th>Time</th>
+      </tr>
+    </thead>
+    <tbody>
+      ${batch.rows.map((r) => `
+        <tr>
+          <td>${r.n_agents}</td>
+          <td>${r.seed}</td>
+          <td>${ALGORITHM_LABELS[r.algorithm] || r.algorithm}</td>
+          <td class="${r.solved ? 'cell-pass' : 'cell-fail'}">${r.solved ? '✓' : '✕'}</td>
+          <td class="${r.valid ? 'cell-pass' : 'cell-fail'}">${r.valid ? '✓' : '✕'}</td>
+          <td>${r.sum_of_costs ?? '—'}</td>
+          <td>${r.makespan ?? '—'}</td>
+          <td>${fmtTime(r.runtime)}</td>
+        </tr>
+      `).join('')}
+    </tbody>
+  `;
+}
+
+async function runBatchExperiment() {
+  if (state.running) return;
+  const scenario = $('bench-scenario').value || 'random_obstacles';
+  const agentCounts = ($('bench-agents').value || '2,4,6').split(',').map((s) => Number(s.trim()));
+  const numSeeds = Number($('bench-seeds').value || 3);
+  const seeds = Array.from({ length: numSeeds }, (_, i) => i);
+  const mappoMode = $('bench-mappo-mode').value || 'sampled';
+
+  state.running = true;
+  $('run-bench').disabled = true;
+  $('bench-status').textContent = `Running ${agentCounts.length * seeds.length * 3} trials on '${scenario}'…`;
+
+  try {
+    if (state.backendAvailable) {
+      const resp = await fetch('/api/batch', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          scenario,
+          agent_counts: agentCounts,
+          seeds,
+          time_limit: 2.5,
+          mappo_mode: mappoMode,
+        }),
+      });
+      const data = await resp.json();
+      if (!resp.ok || !data.ok) throw new Error('Batch API error');
+      renderBatchResults(data);
+    } else {
+      const rows = [];
+      for (const n of agentCounts) {
+        for (const seed of seeds) {
+          let built;
+          try {
+            built = buildScenario(scenario, { agents: n, seed });
+          } catch (e) {
+            continue;
+          }
+          const payload = {
+            matrix: built.matrix,
+            agents: built.agents,
+            heuristic: 'manhattan',
+            time_limit: 2.5,
+            mappo_mode: mappoMode,
+            seed,
+          };
+          for (const algo of ALGORITHMS) {
+            const res = runAlgorithmLocally(algo, payload);
+            rows.push({
+              scenario,
+              n_agents: built.agents.length,
+              seed,
+              algorithm: algo,
+              solved: res.solved,
+              valid: res.valid,
+              sum_of_costs: res.sum_of_costs ?? res.sumOfCosts,
+              makespan: res.makespan,
+              expansions: res.expansions,
+              runtime: algo === 'mappo' ? (res.inference_time ?? res.runtime) : res.runtime,
+              timing_type: algo === 'mappo' ? 'policy_inference' : 'online_search',
+              status_reason: res.status_reason,
+            });
+          }
+          await new Promise((r) => setTimeout(r, 0));
+        }
+      }
+      const summary = summarizeLocalBatch(rows);
+      const csvHeader = 'scenario,n_agents,seed,algorithm,solved,valid,sum_of_costs,makespan,expansions,runtime,timing_type,status_reason';
+      const csvLines = rows.map((r) => [
+        r.scenario, r.n_agents, r.seed, r.algorithm, r.solved, r.valid,
+        r.sum_of_costs ?? '', r.makespan ?? '', r.expansions ?? '',
+        (r.runtime ?? 0).toFixed(6), r.timing_type, `"${String(r.status_reason || '').replace(/"/g, '""')}"`,
+      ].join(','));
+      renderBatchResults({
+        scenario,
+        agent_counts: agentCounts,
+        seeds,
+        rows,
+        summary,
+        csv: [csvHeader, ...csvLines].join('\n'),
+      });
+    }
+    $('bench-status').textContent = `Completed ${state.batchData.rows.length} algorithm evaluations across ${agentCounts.length * seeds.length} shared problem instances.`;
+  } catch (err) {
+    $('bench-status').textContent = `Batch experiment error: ${err.message || err}`;
+  } finally {
+    state.running = false;
+    $('run-bench').disabled = false;
+  }
+}
+
+function downloadBatchCsv() {
+  if (!state.batchData?.csv) return;
+  const blob = new Blob([state.batchData.csv], { type: 'text/csv;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `pymapf-batch-${state.batchData.scenario || 'experiment'}.csv`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+/* ------------------------------------------- Reproducible Code Snippet --- */
+
+function updateEquivalentCode() {
+  const agentLines = state.agentList
+    .map((a) => `    Agent("${a.name}", start=(${a.start[0]}, ${a.start[1]}), goal=(${a.goal[0]}, ${a.goal[1]})),`)
+    .join('\n');
+
+  $('equivalent-code').textContent = `from pymapf import Agent, GridMap, MAPFProblem, solve, validate_solution
+from pymapf.research import compare_all_algorithms
+
+grid = GridMap(${JSON.stringify(state.matrix)})
+agents = [
+${agentLines}
+]
+problem = MAPFProblem(grid, agents, allow_diagonals=False)
+
+# Run Prioritized Space-Time A*, CBS, and MAPPO on the identical problem:
+comparison = compare_all_algorithms({
+    "matrix": grid.as_matrix(),
+    "agents": [{"name": a.name, "start": a.start, "goal": a.goal} for a in agents],
+    "heuristic": "${state.heuristic}",
+    "mappo_mode": "${state.mappoMode}",
+})
+for algo, metrics in comparison["algorithms"].items():
+    print(algo, "solved=", metrics["solved"], "valid=", metrics["valid"], "cost=", metrics["sum_of_costs"])`;
+}
+
+/* ----------------------------------------------------- Initialization --- */
+
+async function detectBackendAndPolicy() {
+  // 1. Load pre-trained MAPPO policy JSON so browser rollouts work everywhere
+  try {
+    const policyResp = await fetch('assets/mappo-policy.json');
+    if (policyResp.ok) {
+      state.policyData = await policyResp.json();
+    }
+  } catch (e) {
+    // Ignore if unavailable
+  }
+
+  // 2. Check if the native Python research server (/api/health) is running
+  try {
+    const resp = await fetch('/api/health');
+    if (resp.ok) {
+      const info = await resp.json();
+      if (info && info.ok) {
+        state.backendAvailable = true;
+        $('engine-glyph').className = 'status-glyph live';
+        $('engine-label').textContent = `Python ${info.python || ''} · pymapf ${info.version} (Prioritized A* · CBS · MAPPO)`;
+        return;
+      }
+    }
+  } catch (e) {
+    // Fallback to browser execution
+  }
+
+  state.backendAvailable = false;
+  $('engine-glyph').className = 'status-glyph live';
+  $('engine-label').textContent = 'Browser Engine + Pre-trained MAPPO Checkpoint ready';
+}
+
+function initControls() {
+  // Populate scenario selects
+  const scenarioSelect = $('scenario');
+  const benchScenarioSelect = $('bench-scenario');
+  for (const [keyName, spec] of Object.entries(SCENARIOS)) {
+    const opt1 = document.createElement('option');
+    opt1.value = keyName;
+    opt1.textContent = spec.label;
+    if (keyName === state.scenario) opt1.selected = true;
+    scenarioSelect.appendChild(opt1);
+
+    const opt2 = document.createElement('option');
+    opt2.value = keyName;
+    opt2.textContent = spec.label;
+    if (keyName === 'random_obstacles') opt2.selected = true;
+    benchScenarioSelect.appendChild(opt2);
+  }
+
+  $('algorithm-blurb').textContent = ALGORITHM_BLURBS[state.algorithm];
+
+  scenarioSelect.addEventListener('change', () => {
+    state.seed = 0;
+    loadScenarioPreset(scenarioSelect.value);
+    runComparison();
+  });
+
+  $('agents').addEventListener('input', () => {
+    state.agents = Number($('agents').value);
+    $('agents-out').textContent = String(state.agents);
+  });
+  $('agents').addEventListener('change', () => {
+    loadScenarioPreset(state.scenario);
+    runComparison();
+  });
+
+  $('seed').addEventListener('input', () => {
+    state.seed = Number($('seed').value);
+    $('seed-out').textContent = String(state.seed);
+  });
+  $('seed').addEventListener('change', () => {
+    loadScenarioPreset(state.scenario);
+    runComparison();
+  });
+
+  $('grid-rows').addEventListener('input', () => {
+    $('grid-rows-out').textContent = $('grid-rows').value;
+  });
+  $('grid-cols').addEventListener('input', () => {
+    $('grid-cols-out').textContent = $('grid-cols').value;
+  });
+
+  $('regenerate').addEventListener('click', () => {
+    state.seed = (state.seed + 1) % 41;
+    loadScenarioPreset(state.scenario);
+    runComparison();
+  });
+  $('resize-apply').addEventListener('click', resizeEmptyGrid);
+  $('clear-walls').addEventListener('click', clearInteriorObstacles);
+
+  $('algorithm').addEventListener('change', () => {
+    state.algorithm = $('algorithm').value;
+    $('algorithm-blurb').textContent = ALGORITHM_BLURBS[state.algorithm] || '';
+    drawAllCanvases();
+  });
+
+  $('heuristic').addEventListener('change', () => {
+    state.heuristic = $('heuristic').value;
+    updateEquivalentCode();
+  });
+
+  $('time-limit').addEventListener('change', () => {
+    state.timeLimit = Number($('time-limit').value);
+  });
+
+  // MAPPO mode toggle
+  document.querySelectorAll('#mappo-mode-group button').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      state.mappoMode = btn.dataset.mode;
+      document.querySelectorAll('#mappo-mode-group button').forEach((b) => {
+        b.setAttribute('aria-pressed', String(b === btn));
+      });
+      updateEquivalentCode();
     });
   });
 
-  $('run').addEventListener('click', run);
-  $('regenerate').addEventListener('click', () => {
-    $('seed').value = String((state.seed + 1) % 41);
-    state.seed = Number($('seed').value);
-    $('seed-out').value = $('seed').value;
-    regenerate();
+  $('train-mappo-btn').addEventListener('click', trainMappoOnActiveGrid);
+  $('run-compare').addEventListener('click', () => runComparison(null));
+  $('hero-run-compare').addEventListener('click', () => {
+    document.getElementById('comparison')?.scrollIntoView({ behavior: 'smooth' });
+    runComparison(null);
   });
-  $('clear-walls').addEventListener('click', () => {
-    const rows = state.matrix.length; const cols = state.matrix[0].length;
-    state.matrix = state.matrix.map((row, r) => row.map((v, c) =>
-      ((r === 0 || c === 0 || r === rows - 1 || c === cols - 1) ? 1 : 0)));
-    state.solution = null;
-    draw();
+  $('run-single').addEventListener('click', () => runComparison(state.algorithm));
+
+  // Editor tool buttons
+  document.querySelectorAll('.tool-btn').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      state.tool = btn.dataset.tool;
+      document.querySelectorAll('.tool-btn').forEach((b) => {
+        b.setAttribute('aria-pressed', String(b === btn));
+      });
+      const hints = {
+        wall: 'Click or drag on any unoccupied cell to add or remove obstacles.',
+        start: 'Click any free cell to move the selected Active Agent’s start position.',
+        goal: 'Click any free cell to move the selected Active Agent’s goal position.',
+        add: 'Click any free cell to spawn a new agent starting on that cell.',
+      };
+      setFeedback(hints[state.tool] || '');
+    });
   });
 
-  $('play').addEventListener('click', () => {
-    if (state.playing) { state.playing = false; $('play').textContent = '⏵ Play'; } else play();
+  $('active-agent-select').addEventListener('change', () => {
+    state.activeAgentIndex = Number($('active-agent-select').value);
+    syncRosterAndControls();
+    drawAllCanvases();
   });
-  $('timeline').addEventListener('input', (event) => {
+
+  $('remove-agent-btn').addEventListener('click', removeActiveAgent);
+
+  // Playback transport controls
+  $('play').addEventListener('click', togglePlay);
+  $('step-prev').addEventListener('click', () => {
     state.playing = false;
     $('play').textContent = '⏵ Play';
-    state.t = Number(event.target.value);
-    $('clock').textContent = `t = ${state.t} / ${state.solution?.makespan ?? 0}`;
-    draw();
+    setPlayhead(Math.max(0, Math.floor(state.t) - 1));
+  });
+  $('step-next').addEventListener('click', () => {
+    state.playing = false;
+    $('play').textContent = '⏵ Play';
+    setPlayhead(Math.min(state.horizon, Math.floor(state.t) + 1));
+  });
+  $('step-reset').addEventListener('click', () => {
+    state.playing = false;
+    $('play').textContent = '⏵ Play';
+    setPlayhead(0);
+  });
+  $('timeline').addEventListener('input', () => {
+    state.playing = false;
+    $('play').textContent = '⏵ Play';
+    setPlayhead(Number($('timeline').value));
+  });
+  $('playback-speed').addEventListener('change', () => {
+    state.speed = Number($('playback-speed').value || 3.2);
   });
 
-  $('run-code').addEventListener('click', runCode);
-  $('run-bench').addEventListener('click', runBenchmark);
+  // Batch experiments
+  $('run-bench').addEventListener('click', runBatchExperiment);
+  $('export-csv').addEventListener('click', downloadBatchCsv);
 
-  for (const tab of ['visual', 'code', 'bench']) {
-    $(`tab-${tab}`).addEventListener('click', () => selectTab(tab));
-  }
-
+  // Theme toggle
   $('theme-toggle').addEventListener('click', () => {
-    const next = document.documentElement.dataset.theme === 'light' ? 'dark' : 'light';
-    document.documentElement.dataset.theme = next;
-    try { localStorage.setItem('pymapf-theme', next); } catch { /* private mode */ }
-    draw();
-    renderBenchmark();
+    const html = document.documentElement;
+    html.dataset.theme = html.dataset.theme === 'light' ? 'dark' : 'light';
+    drawAllCanvases();
+    if (state.batchData) renderBatchResults(state.batchData);
   });
 
-  window.addEventListener('resize', draw);
-  window.addEventListener('keydown', (event) => {
-    if (event.target.matches('input, textarea, select')) return;
-    if (event.key === 'r') run();
-    if (event.key === ' ') { event.preventDefault(); $('play').click(); }
+  window.addEventListener('resize', () => {
+    drawAllCanvases();
   });
 }
 
-/* ------------------------------------------------------------ learning --- */
-
-/**
- * Render the RL benchmark from assets/rl-benchmark.json.
- *
- * The file is the artifact scripts/train_rl.py writes, shipped verbatim. Reading
- * it here rather than hard-coding the table is the whole point: retrain, drop in
- * the new JSON, and the page cannot disagree with the run that produced it.
- */
-async function initLearning() {
-  const status = $('rl-status');
-  const select = $('rl-setting');
-  const table = $('rl-table');
-  if (!status || !select || !table) return;
-
-  let report;
-  try {
-    const response = await fetch('assets/rl-benchmark.json');
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    report = await response.json();
-  } catch (error) {
-    status.textContent = `benchmark unavailable (${error.message})`;
-    return;
-  }
-
-  const settings = report.settings ?? [];
-  if (!settings.length) { status.textContent = 'benchmark is empty'; return; }
-
-  const label = (setting) => {
-    const { n_agents: agents, height, width, density } = setting.kwargs ?? {};
-    const size = height && width ? `${height}×${width}` : 'fixed map';
-    return `${setting.family.replace(/_/g, ' ')} — ${size}, ${agents} agents`
-      + (density ? `, ${Math.round(density * 100)}% obstacles` : '');
-  };
-
-  select.innerHTML = settings
-    .map((setting, i) => `<option value="${i}">${label(setting)}</option>`).join('');
-
-  const render = () => {
-    const setting = settings[Number(select.value)];
-    // A method that solved nothing has no cost and no ratio; those are null in
-    // the artifact and render as an em dash. Suboptimality is against CBS, which
-    // is optimal, so the ratio is true suboptimality rather than a gap against
-    // another heuristic.
-    const cell = (value, digits, suffix, fail) => (Number.isFinite(value)
-      ? `<td${fail ? ' class="fail"' : ''}>${value.toFixed(digits)}${suffix}</td>`
-      : '<td>—</td>');
-    const rows = setting.rows.map((row) => {
-      const solved = 100 * row.success_rate;
-      const planner = !row.method.includes('(');
-      return `<tr>
-        <td${planner ? ' style="font-weight:600"' : ''}>${row.method}</td>
-        ${cell(solved, 0, '%', solved < 50)}
-        ${cell(row.mean_cost, 1, '', false)}
-        ${cell(row.suboptimality, 2, '×', false)}
-        <td>${fmtMs(row.mean_runtime)}</td>
-      </tr>`;
-    }).join('');
-    table.innerHTML = `<thead><tr>
-        <th>method</th><th>solved</th><th>cost</th><th>vs optimal</th><th>runtime</th>
-      </tr></thead><tbody>${rows}</tbody>`;
-  };
-
-  select.addEventListener('change', render);
-  status.textContent = `pymapf ${report.version} · ${report.config?.steps?.toLocaleString() ?? '?'} `
-    + `steps per algorithm · ${report.config?.episodes ?? '?'} eval episodes`;
-  render();
-}
-
-function boot() {
-  try {
-    const stored = localStorage.getItem('pymapf-theme');
-    if (stored) document.documentElement.dataset.theme = stored;
-  } catch { /* ignore */ }
-
-  wire();
-  $('algorithm-blurb').textContent = ALGORITHM_BLURBS[state.algorithm];
-  regenerate();
-  bootWorker();
-  initLearning();
+async function boot() {
+  initControls();
+  wireBoardInteractions();
+  loadScenarioPreset('bottleneck');
+  await detectBackendAndPolicy();
+  await runComparison(null);
+  runBatchExperiment();
 }
 
 boot();

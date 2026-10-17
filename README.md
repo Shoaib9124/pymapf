@@ -36,6 +36,35 @@ Loved the project? Please consider [donating](https://www.buymeacoffee.com/dq01a
 
 </div>
 
+## 2D Multi-Agent Pathfinding Research & Simulation Platform
+
+A focused, interactive 2D Multi-Agent Pathfinding (MAPF) research platform built on top of `pymapf` for controlled algorithmic evaluation and academic demonstrations:
+
+- **Interactive 2D Grid & Agent Editor**: Configure grid dimensions (5×5 to 22×22) or load 6 reproducible 2D benchmark scenario families (`empty_room`, `random_obstacles`, `warehouse`, `maze`, `bottleneck`, `corner_swap`), toggle obstacle cells, and add/remove/reposition agents with distinct start and goal coordinates.
+- **Three Target Algorithmic Approaches**:
+  1. **Prioritized Planning (`prioritized`)**: Sequential Space-Time A* with a dynamic vertex/edge reservation table (classical baseline).
+  2. **Conflict-Based Search (`cbs`)**: Bi-level constraint-tree search with Space-Time A* low-level planner (complete & provably sum-of-costs optimal).
+  3. **Multi-Agent Proximal Policy Optimization (`mappo`)**: Centralized-critic PPO (`pymapf.rl.MAPPO`) with 9×9 egocentric 4-channel observations and normalized goal vectors, supporting both pre-trained policy evaluation and live on-instance training, plus Greedy vs. Sampled rollout modes.
+- **Synchronized 3-Panel Side-by-Side Comparison**: Configure a problem once and click **Run Comparison** to replay all three algorithms simultaneously on a shared timeline (`t = 0 … H_max`), or run a single selected algorithm independently.
+- **Formal Solution Validation (`pymapf.core.validate_solution`)**: Audits every path or rollout against 6 explicit criteria:
+  1. In-bounds & obstacle-free cells at every timestep
+  2. Legal 4-connected cardinal moves + wait actions (`allow_diagonals=False`)
+  3. Vertex conflict-free (no two agents occupy the same cell at timestep `t`)
+  4. Edge-swap conflict-free (no two agents swap adjacent cells between `t` and `t+1`)
+  5. Goal reachability (every agent ends at its assigned goal)
+  6. Stay-at-goal occupancy semantics (parked goal agents block collisions at all subsequent timesteps)
+- **Comparative Metrics & Batch Experiments**: Separates online search planning time from offline/instance RL training time and rollout inference time, and runs multi-seed batch sweeps with CSV export.
+
+### Running the Research Platform
+
+```bash
+# Start the interactive web platform and Python API server on http://0.0.0.0:3000
+python3 main.py
+
+# Or run a headless CLI comparison and print the summary table
+python3 main.py --cli --scenario bottleneck --agents 4 --seed 0
+```
+
 ## Features
 
 - 🎮 **[Interactive playground](https://openplan-labs.github.io/pymapf/)** — run the solvers in your browser, watch the search resolve conflicts live

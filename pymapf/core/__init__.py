@@ -12,10 +12,12 @@ from .solver import (
     MAPFProblem,
     MAPFSolver,
     Solution,
+    ValidationReport,
     available_solvers,
     find_first_conflict,
     get_solver,
     register_solver,
+    validate_solution,
 )
 
 __all__ = [
@@ -34,10 +36,12 @@ __all__ = [
     "MAPFProblem",
     "MAPFSolver",
     "Solution",
+    "ValidationReport",
     "available_solvers",
     "find_first_conflict",
     "get_solver",
     "register_solver",
+    "validate_solution",
     "Observer",
     "SearchEvent",
     "SearchTrace",

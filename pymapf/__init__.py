@@ -32,11 +32,13 @@ from .core import (
     SearchEvent,
     SearchTrace,
     Solution,
+    ValidationReport,
     VoxelGrid,
     available_solvers,
     find_first_conflict,
     get_solver,
     register_solver,
+    validate_solution,
 )
 
 # Importing the algorithms package registers the built-in solvers by name.
@@ -90,6 +92,7 @@ __all__ = [
     "SearchEvent",
     "SearchTrace",
     "Solution",
+    "ValidationReport",
     "available_scenarios",
     "build_scenario",
     "ConflictBasedSearch",
@@ -107,6 +110,7 @@ __all__ = [
     "find_first_conflict",
     "get_solver",
     "register_solver",
+    "validate_solution",
     "solve",
     "kinodynamic",
     "__version__",
